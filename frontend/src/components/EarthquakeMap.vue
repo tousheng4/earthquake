@@ -15,15 +15,40 @@
       <el-icon class="is-loading"><Loading /></el-icon>
       <span>Loading Data...</span>
     </div>
+
+    <!-- 时间轴控件 -->
+    <div class="time-slider-container" v-if="earthquakes.length > 0">
+      <el-button 
+        circle 
+        :icon="isPlaying ? VideoPause : VideoPlay" 
+        @click="togglePlay"
+        class="play-btn"
+      />
+      <div class="slider-wrapper">
+        <span class="time-label">{{ dayjs(minTime).format('MM-DD HH:mm') }}</span>
+        <el-slider 
+          v-model="sliderValue" 
+          :min="minTime" 
+          :max="maxTime" 
+          :format-tooltip="formatTooltip"
+          class="custom-slider"
+        />
+        <span class="time-label">{{ dayjs(maxTime).format('MM-DD HH:mm') }}</span>
+      </div>
+      <div class="current-time-display">
+        {{ sliderLabel }}
+      </div>
+    </div>
   </el-main>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
 import * as echarts from "echarts";
 import axios from "axios";
 import dayjs from "dayjs";
 import { getColorByMagnitude, formatCoordinate } from '../utils/formatters';
+import { VideoPlay, VideoPause } from '@element-plus/icons-vue';
 
 const props = defineProps({
   earthquakes: {
@@ -42,6 +67,89 @@ const props = defineProps({
 
 const chartRef = ref(null);
 let chartInstance = null;
+
+// --- Playback State ---
+const isPlaying = ref(false);
+const sliderValue = ref(0); // Current timestamp
+const minTime = ref(0);
+const maxTime = ref(0);
+let playbackTimer = null;
+
+// --- Computed ---
+const displayedQuakes = computed(() => {
+  if (!props.earthquakes.length) return [];
+  // Show earthquakes that happened <= sliderValue
+  return props.earthquakes.filter(q => new Date(q.time).getTime() <= sliderValue.value);
+});
+
+const sliderLabel = computed(() => {
+  return dayjs(sliderValue.value).format("YYYY-MM-DD HH:mm");
+});
+
+// --- Watchers ---
+watch(() => props.earthquakes, (newVal) => {
+  if (newVal.length > 0) {
+    const times = newVal.map(q => new Date(q.time).getTime());
+    minTime.value = Math.min(...times);
+    maxTime.value = Math.max(...times);
+    
+    // If not playing and slider is at the end (or uninitialized), snap to end
+    if (!isPlaying.value) {
+      sliderValue.value = maxTime.value;
+    }
+  }
+}, { immediate: true });
+
+watch(displayedQuakes, (newVal) => {
+  if (chartInstance) {
+    const option = getChartOption(newVal);
+    chartInstance.setOption(option);
+  }
+});
+
+// --- Playback Logic ---
+function togglePlay() {
+  isPlaying.value = !isPlaying.value;
+  if (isPlaying.value) {
+    if (sliderValue.value >= maxTime.value) {
+      sliderValue.value = minTime.value;
+    }
+    startPlayback();
+  } else {
+    stopPlayback();
+  }
+}
+
+function startPlayback() {
+  stopPlayback();
+  // Duration of playback in ms (e.g., 10 seconds for the whole range)
+  const playbackDuration = 10000; 
+  const interval = 50; // Update every 50ms
+  const totalSteps = playbackDuration / interval;
+  const timeRange = maxTime.value - minTime.value;
+  const stepSize = timeRange / totalSteps;
+
+  playbackTimer = setInterval(() => {
+    if (sliderValue.value + stepSize >= maxTime.value) {
+      sliderValue.value = maxTime.value;
+      isPlaying.value = false;
+      stopPlayback();
+    } else {
+      sliderValue.value += stepSize;
+    }
+  }, interval);
+}
+
+function stopPlayback() {
+  if (playbackTimer) {
+    clearInterval(playbackTimer);
+    playbackTimer = null;
+  }
+}
+
+function formatTooltip(val) {
+  return dayjs(val).format("YYYY-MM-DD HH:mm");
+}
 
 // --- ECharts 逻辑 ---
 async function loadWorldMap() {
@@ -236,17 +344,23 @@ function getChartOption(data) {
 function updateChart() {
   if (!chartInstance) return;
   chartInstance.clear();
-  const option = getChartOption(props.earthquakes);
+  // Use displayedQuakes instead of props.earthquakes
+  const option = getChartOption(displayedQuakes.value);
   chartInstance.setOption(option);
 }
 
 function focusOnQuake(quake) {
   if (!chartInstance) return;
   
+  // Ensure the quake is visible in the current time window
+  if (new Date(quake.time).getTime() > sliderValue.value) {
+      sliderValue.value = new Date(quake.time).getTime();
+  }
+
   chartInstance.dispatchAction({
     type: "showTip",
     seriesIndex: 0,
-    dataIndex: props.earthquakes.indexOf(quake)
+    dataIndex: displayedQuakes.value.indexOf(quake) // Find index in filtered list
   });
 
   const option = chartInstance.getOption();
@@ -337,5 +451,62 @@ watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.map
   color: #409eff;
   gap: 10px;
   z-index: 100;
+}
+
+.time-slider-container {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 60%;
+  background-color: rgba(22, 36, 56, 0.9);
+  border: 1px solid #2c3e50;
+  padding: 10px 20px;
+  border-radius: 30px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  z-index: 10;
+  backdrop-filter: blur(4px);
+  color: #fff;
+}
+
+.play-btn {
+  background-color: #409eff;
+  border-color: #409eff;
+  color: white;
+}
+
+.play-btn:hover {
+  background-color: #66b1ff;
+  border-color: #66b1ff;
+}
+
+.slider-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.custom-slider {
+  flex: 1;
+  --el-slider-main-bg-color: #409eff;
+  --el-slider-runway-bg-color: #4c5d70;
+}
+
+.time-label {
+  font-size: 12px;
+  color: #909399;
+  white-space: nowrap;
+}
+
+.current-time-display {
+  font-family: monospace;
+  font-weight: bold;
+  color: #409eff;
+  min-width: 120px;
+  text-align: center;
+  font-size: 14px;
 }
 </style>
