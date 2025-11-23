@@ -37,6 +37,39 @@
         </div>
       </el-card>
 
+      <!-- GIS Analysis Tools -->
+      <el-card shadow="hover" class="filter-card">
+        <template #header>
+          <div class="card-header">GIS Analysis</div>
+        </template>
+        <div class="gis-controls">
+          <div class="control-item">
+            <span>Cluster View</span>
+            <el-switch 
+              :model-value="showCluster"
+              @update:model-value="$emit('update:showCluster', $event)"
+              size="small"
+            />
+          </div>
+          <div class="control-item">
+            <span>Show Buffers (200km)</span>
+            <el-switch 
+              :model-value="showBuffer"
+              @update:model-value="$emit('update:showBuffer', $event)"
+              size="small"
+            />
+          </div>
+          <div class="control-item">
+            <span>Nearest Query Mode</span>
+            <el-switch 
+              :model-value="enableNearestQuery"
+              @update:model-value="$emit('update:enableNearestQuery', $event)"
+              size="small"
+            />
+          </div>
+        </div>
+      </el-card>
+
       <!-- 列表 -->
       <div class="list-container">
         <div class="list-header">Recent Earthquakes</div>
@@ -75,10 +108,14 @@ const props = defineProps({
   minMag: {
     type: Number,
     default: 2.5
-  }
+  },
+  // GIS Props
+  showCluster: Boolean,
+  showBuffer: Boolean,
+  enableNearestQuery: Boolean
 });
 
-defineEmits(['update:minMag', 'quake-selected']);
+defineEmits(['update:minMag', 'quake-selected', 'update:showCluster', 'update:showBuffer', 'update:enableNearestQuery']);
 
 const maxMagnitude = computed(() => {
   if (props.filteredQuakes.length === 0) return 0;
@@ -150,6 +187,20 @@ const maxMagnitude = computed(() => {
   display: block;
   margin-bottom: 5px;
   font-size: 14px;
+  color: #ccc;
+}
+
+.gis-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.control-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
   color: #ccc;
 }
 

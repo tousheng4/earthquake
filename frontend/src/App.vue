@@ -11,6 +11,9 @@
       <Sidebar 
         :filteredQuakes="filteredQuakes"
         v-model:minMag="minMag"
+        v-model:showCluster="showCluster"
+        v-model:showBuffer="showBuffer"
+        v-model:enableNearestQuery="enableNearestQuery"
         @quake-selected="handleQuakeSelected"
       />
 
@@ -22,6 +25,9 @@
         :showPlates="showPlates"
         :mapStyle="mapStyle"
         :loading="loading"
+        :showCluster="showCluster"
+        :showBuffer="showBuffer"
+        :enableNearestQuery="enableNearestQuery"
       />
     </el-container>
   </el-container>
@@ -45,6 +51,11 @@ const minMag = ref(2.5); // 默认过滤掉小地震
 const isHeatmapMode = ref(false); // GIS: 切换可视化模式
 const showPlates = ref(false); // GIS: 显示板块边界
 const mapStyle = ref("dark"); // GIS: 底图风格
+// GIS Advanced Features
+const showCluster = ref(false);
+const showBuffer = ref(false);
+const enableNearestQuery = ref(false);
+
 let timerId = null;
 let clockId = null;
 

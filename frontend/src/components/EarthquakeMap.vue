@@ -18,25 +18,29 @@
 
     <!-- 时间轴控件 -->
     <div class="time-slider-container" v-if="earthquakes.length > 0">
-      <el-button 
-        circle 
-        :icon="isPlaying ? VideoPause : VideoPlay" 
-        @click="togglePlay"
-        class="play-btn"
-      />
-      <div class="slider-wrapper">
-        <span class="time-label">{{ dayjs(minTime).format('MM-DD HH:mm') }}</span>
-        <el-slider 
-          v-model="sliderValue" 
-          :min="minTime" 
-          :max="maxTime" 
-          :format-tooltip="formatTooltip"
-          class="custom-slider"
+      <div class="control-row">
+        <el-button 
+          circle 
+          :icon="isPlaying ? VideoPause : VideoPlay" 
+          @click="togglePlay"
+          class="play-btn"
+          type="primary"
         />
-        <span class="time-label">{{ dayjs(maxTime).format('MM-DD HH:mm') }}</span>
+        <div class="slider-wrapper">
+          <span class="time-label">{{ formatTimeLabel(minTime) }}</span>
+          <el-slider 
+            v-model="sliderValue" 
+            :min="minTime" 
+            :max="maxTime" 
+            :format-tooltip="formatTooltip"
+            class="custom-slider"
+            :show-tooltip="false"
+          />
+          <span class="time-label">{{ formatTimeLabel(maxTime) }}</span>
+        </div>
       </div>
       <div class="current-time-display">
-        {{ sliderLabel }}
+        Current: {{ sliderLabel }}
       </div>
     </div>
   </el-main>
@@ -62,11 +66,20 @@ const props = defineProps({
   isHeatmapMode: Boolean,
   showPlates: Boolean,
   mapStyle: String,
-  loading: Boolean
+  loading: Boolean,
+  // GIS Features
+  showBuffer: Boolean,
+  enableNearestQuery: Boolean,
+  showCluster: Boolean
 });
 
 const chartRef = ref(null);
 let chartInstance = null;
+
+// --- GIS State ---
+const bufferData = ref(null); // GeoJSON for buffer
+const clusterData = ref([]); // Data for cluster view
+const nearestLine = ref(null); // Line to nearest quake
 
 // --- Playback State ---
 const isPlaying = ref(false);
@@ -83,8 +96,12 @@ const displayedQuakes = computed(() => {
 });
 
 const sliderLabel = computed(() => {
-  return dayjs(sliderValue.value).format("YYYY-MM-DD HH:mm");
+  return dayjs(sliderValue.value).format("YYYY-MM-DD HH:mm:ss");
 });
+
+function formatTimeLabel(ts) {
+  return dayjs(ts).format('MM-DD HH:mm');
+}
 
 // --- Watchers ---
 watch(() => props.earthquakes, (newVal) => {
@@ -94,7 +111,7 @@ watch(() => props.earthquakes, (newVal) => {
     maxTime.value = Math.max(...times);
     
     // If not playing and slider is at the end (or uninitialized), snap to end
-    if (!isPlaying.value) {
+    if (!isPlaying.value && (sliderValue.value === 0 || sliderValue.value >= maxTime.value)) {
       sliderValue.value = maxTime.value;
     }
   }
@@ -123,7 +140,7 @@ function togglePlay() {
 function startPlayback() {
   stopPlayback();
   // Duration of playback in ms (e.g., 10 seconds for the whole range)
-  const playbackDuration = 10000; 
+  const playbackDuration = 15000; // Slower playback
   const interval = 50; // Update every 50ms
   const totalSteps = playbackDuration / interval;
   const timeRange = maxTime.value - minTime.value;
@@ -221,10 +238,21 @@ function getChartOption(data) {
       textStyle: { color: "#fff" },
       formatter: (params) => {
         if (params.seriesType === "heatmap") return;
-        if (params.seriesType === "lines") return `<div>Plate Boundary: ${params.data.name}</div>`;
+        if (params.seriesType === "lines" && params.seriesName === "Tectonic Plates") return `<div>Plate Boundary: ${params.data.name}</div>`;
+        if (params.seriesType === "lines" && params.seriesName === "Nearest Link") return `<div>Distance: ${(params.data.distance / 1000).toFixed(1)} km</div>`;
         
         const d = params.data;
         if (!d) return "";
+        
+        // Cluster Tooltip
+        if (props.showCluster && d.count) {
+           return `
+            <div style="font-weight: bold; color: #e6a23c;">Cluster Info</div>
+            <div>Count: ${d.count}</div>
+            <div>Avg Mag: ${d.avg_magnitude.toFixed(1)}</div>
+           `;
+        }
+
         return `
           <div style="font-family: monospace; border-bottom: 1px solid #555; padding-bottom: 5px; margin-bottom: 5px; font-weight: bold; color: #409eff;">
             ${d.region}
@@ -295,8 +323,89 @@ function getChartOption(data) {
     });
   }
 
-  // 2. 地震数据图层
-  if (props.isHeatmapMode) {
+  // 2. 缓冲区图层 (GIS)
+  if (props.showBuffer && bufferData.value) {
+    // ECharts GeoJSON support via map registration or custom series is tricky for dynamic shapes.
+    // Simplified approach: Use 'lines' to draw the buffer boundary if it's a polygon, 
+    // or register a temporary map. Here we register a temp map for the buffer.
+    echarts.registerMap('buffer_layer', bufferData.value);
+    baseOption.series.push({
+      type: 'map',
+      map: 'buffer_layer',
+      geoIndex: 0, // Share the same geo coordinate system
+      itemStyle: {
+        areaColor: 'rgba(255, 0, 0, 0.1)',
+        borderColor: '#ff0000',
+        borderWidth: 1,
+        borderType: 'dashed'
+      },
+      emphasis: {
+        label: { show: false },
+        itemStyle: { areaColor: 'rgba(255, 0, 0, 0.2)' }
+      },
+      zlevel: 1.5,
+      silent: true // Do not trigger events
+    });
+  }
+
+  // 3. 最近邻连线 (GIS)
+  if (nearestLine.value) {
+    baseOption.series.push({
+      type: "lines",
+      name: "Nearest Link",
+      coordinateSystem: "geo",
+      data: [nearestLine.value],
+      lineStyle: {
+        color: "#00ff00",
+        width: 2,
+        curveness: 0.2
+      },
+      effect: {
+        show: true,
+        period: 6,
+        trailLength: 0.7,
+        color: '#fff',
+        symbolSize: 3
+      },
+      zlevel: 3
+    });
+  }
+
+  // 4. 数据图层 (Cluster or Normal)
+  if (props.showCluster) {
+    // Cluster View
+    const clusters = Array.isArray(clusterData.value) ? clusterData.value : [];
+    baseOption.series.push({
+      name: "Earthquake Clusters",
+      type: "scatter",
+      coordinateSystem: "geo",
+      data: clusters.map(c => ({
+        value: [c.center_lon, c.center_lat, c.count],
+        count: c.count,
+        avg_magnitude: c.avg_magnitude
+      })),
+      symbolSize: (val) => {
+        // Scale symbol size by count
+        return Math.min(10 + Math.sqrt(val[2]) * 5, 60);
+      },
+      itemStyle: {
+        color: (params) => {
+           // Color by avg magnitude
+           return getColorByMagnitude(params.data.avg_magnitude);
+        },
+        shadowBlur: 10,
+        shadowColor: '#333'
+      },
+      label: {
+        show: true,
+        formatter: '{@[2]}',
+        fontSize: 10,
+        color: '#fff'
+      },
+      zlevel: 1
+    });
+
+  } else if (props.isHeatmapMode) {
     baseOption.series.push({
       name: "Earthquake Density",
       type: "heatmap",
@@ -307,6 +416,7 @@ function getChartOption(data) {
       zlevel: 1
     });
   } else {
+    // Normal Scatter
     baseOption.series.push({
       name: "Earthquakes",
       type: "effectScatter",
@@ -341,17 +451,89 @@ function getChartOption(data) {
   return baseOption;
 }
 
+// --- GIS Actions ---
+async function fetchBuffer(quake) {
+  if (!props.showBuffer) return;
+  try {
+    // Request 200km buffer for example
+    const res = await axios.get(`/earthquakes/buffer?radius_km=200&hours=48`);
+    // Filter for the specific quake if needed, or just show all buffers. 
+    // The API returns buffers for ALL quakes in window. 
+    // Let's optimize: The user probably wants the buffer for the SELECTED quake.
+    // But the current API returns a collection. 
+    // Let's assume we want to visualize the buffer for the *focused* quake.
+    // Since the API calculates buffers for *filtered* events, we might get many.
+    // For this demo, let's just use the result directly.
+    bufferData.value = res.data;
+    updateChart();
+  } catch (e) {
+    console.error("Buffer fetch failed", e);
+  }
+}
+
+async function fetchCluster() {
+  try {
+    const res = await axios.get(`/stats/cluster?cell_km=100&hours=48`);
+    if (Array.isArray(res.data)) {
+      clusterData.value = res.data;
+      updateChart();
+    } else {
+      console.error("Cluster data is not an array:", res.data);
+      clusterData.value = [];
+    }
+  } catch (e) {
+    console.error("Cluster fetch failed", e);
+    clusterData.value = [];
+  }
+}
+
+async function handleMapClick(params) {
+  if (props.enableNearestQuery && params.componentType === 'geo') {
+    // Clicked on empty map space (geo component)
+    const [lon, lat] = params.coord || chartInstance.convertFromPixel('geo', [params.event.offsetX, params.event.offsetY]);
+    
+    try {
+      const res = await axios.get(`/earthquakes/nearest?lon=${lon}&lat=${lat}&limit=1`);
+      if (res.data && res.data.length > 0) {
+        const nearest = res.data[0];
+        // Draw line
+        nearestLine.value = {
+          coords: [[lon, lat], [nearest.longitude, nearest.latitude]],
+          distance: nearest.distance_m
+        };
+        updateChart();
+      }
+    } catch (e) {
+      console.error("Nearest fetch failed", e);
+    }
+  } else {
+    // Clear line if clicking elsewhere
+    nearestLine.value = null;
+    updateChart();
+  }
+}
+
+// --- Lifecycle ---
 function updateChart() {
   if (!chartInstance) return;
   chartInstance.clear();
   // Use displayedQuakes instead of props.earthquakes
-  const option = getChartOption(displayedQuakes.value);
+  // If showing cluster, we don't use displayedQuakes for the main series
+  const dataToUse = props.showCluster ? [] : displayedQuakes.value;
+  const option = getChartOption(dataToUse);
   chartInstance.setOption(option);
 }
 
 function focusOnQuake(quake) {
   if (!chartInstance) return;
   
+  // GIS: Fetch buffer if enabled
+  if (props.showBuffer) {
+      // Ideally we'd fetch buffer just for this quake. 
+      // Current API fetches all. Let's stick to that for now or improve API later.
+      fetchBuffer(quake);
+  }
+
   // Ensure the quake is visible in the current time window
   if (new Date(quake.time).getTime() > sliderValue.value) {
       sliderValue.value = new Date(quake.time).getTime();
@@ -374,6 +556,18 @@ defineExpose({ focusOnQuake });
 onMounted(async () => {
   await loadWorldMap();
   chartInstance = echarts.init(chartRef.value);
+  
+  // Click event for Nearest Query
+  chartInstance.getZr().on('click', (params) => {
+      if (!props.enableNearestQuery) return;
+      // Convert pixel to coord
+      const pointInPixel = [params.offsetX, params.offsetY];
+      if (chartInstance.containPixel('geo', pointInPixel)) {
+          const coord = chartInstance.convertFromPixel('geo', pointInPixel);
+          handleMapClick({ componentType: 'geo', coord: coord });
+      }
+  });
+
   updateChart();
   window.addEventListener("resize", () => chartInstance && chartInstance.resize());
 });
@@ -381,10 +575,15 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("resize", () => chartInstance && chartInstance.resize());
   if (chartInstance) chartInstance.dispose();
+  stopPlayback();
 });
 
-watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.mapStyle], () => {
-  updateChart();
+watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.mapStyle, props.showBuffer, props.showCluster, props.enableNearestQuery], () => {
+  if (props.showCluster) {
+      fetchCluster();
+  } else {
+      updateChart();
+  }
 }, { deep: true });
 
 </script>
@@ -394,11 +593,16 @@ watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.map
   padding: 0;
   position: relative;
   background-color: #020b14;
+  height: 100%; /* 强制占满父容器高度 */
+  width: 100%;
+  overflow: hidden; /* 防止内容溢出 */
+  display: flex;    /* 确保内部元素布局正确 */
+  flex-direction: column;
 }
 
 .map-legend {
   position: absolute;
-  bottom: 20px;
+  bottom: 90px; /* 稍微调高一点，避免被时间轴遮挡 */
   right: 20px;
   background-color: rgba(22, 36, 56, 0.9);
   border: 1px solid #2c3e50;
@@ -435,6 +639,9 @@ watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.map
 .chart {
   width: 100%;
   height: 100%;
+  position: absolute; /* 绝对定位以确保占满整个容器 */
+  top: 0;
+  left: 0;
 }
 
 .loading-mask {
@@ -458,55 +665,66 @@ watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.map
   bottom: 30px;
   left: 50%;
   transform: translateX(-50%);
-  width: 60%;
-  background-color: rgba(22, 36, 56, 0.9);
-  border: 1px solid #2c3e50;
-  padding: 10px 20px;
-  border-radius: 30px;
+  width: 70%;
+  min-width: 500px;
+  background-color: rgba(22, 36, 56, 0.95);
+  border: 1px solid #409eff;
+  padding: 15px 25px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 20;
+  backdrop-filter: blur(8px);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.control-row {
   display: flex;
   align-items: center;
   gap: 15px;
-  z-index: 10;
-  backdrop-filter: blur(4px);
-  color: #fff;
-}
-
-.play-btn {
-  background-color: #409eff;
-  border-color: #409eff;
-  color: white;
-}
-
-.play-btn:hover {
-  background-color: #66b1ff;
-  border-color: #66b1ff;
+  width: 100%;
 }
 
 .slider-wrapper {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 15px;
 }
 
 .custom-slider {
   flex: 1;
-  --el-slider-main-bg-color: #409eff;
-  --el-slider-runway-bg-color: #4c5d70;
 }
 
 .time-label {
   font-size: 12px;
-  color: #909399;
+  color: #a0cfff;
+  font-family: monospace;
   white-space: nowrap;
 }
 
 .current-time-display {
-  font-family: monospace;
-  font-weight: bold;
-  color: #409eff;
-  min-width: 120px;
   text-align: center;
   font-size: 14px;
+  color: #409eff;
+  font-weight: bold;
+  font-family: monospace;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px 12px;
+  border-radius: 4px;
+  align-self: center;
+}
+
+.play-btn {
+  background-color: #409eff;
+  border-color: #409eff;
+  color: #fff;
+}
+.play-btn:hover {
+  background-color: #66b1ff;
+  border-color: #66b1ff;
 }
 </style>
+
