@@ -1,171 +1,127 @@
 <template>
-  <div class="app">
-    <h1 class="title">Real-Time Earthquake Map</h1>
-    <div ref="chartRef" class="chart"></div>
-  </div>
+  <el-container class="layout-container" direction="vertical">
+    <TopHeader 
+      v-model:showPlates="showPlates"
+      v-model:mapStyle="mapStyle"
+      v-model:isHeatmapMode="isHeatmapMode"
+      :currentTime="currentTime"
+    />
+
+    <el-container class="main-content">
+      <Sidebar 
+        :filteredQuakes="filteredQuakes"
+        v-model:minMag="minMag"
+        v-model:showCluster="showCluster"
+        v-model:showBuffer="showBuffer"
+        v-model:enableNearestQuery="enableNearestQuery"
+        @quake-selected="handleQuakeSelected"
+      />
+
+      <EarthquakeMap 
+        ref="mapRef"
+        :earthquakes="filteredQuakes"
+        :platesData="platesData"
+        :isHeatmapMode="isHeatmapMode"
+        :showPlates="showPlates"
+        :mapStyle="mapStyle"
+        :loading="loading"
+        :showCluster="showCluster"
+        :showBuffer="showBuffer"
+        :enableNearestQuery="enableNearestQuery"
+      />
+    </el-container>
+  </el-container>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from "vue";
-import * as echarts from "echarts";
+import { ref, onMounted, onBeforeUnmount, computed } from "vue";
 import axios from "axios";
+import dayjs from "dayjs";
+import TopHeader from "./components/TopHeader.vue";
+import Sidebar from "./components/Sidebar.vue";
+import EarthquakeMap from "./components/EarthquakeMap.vue";
 
-// 图表 DOM 引用
-const chartRef = ref(null);
-// ECharts 实例
-let chartInstance = null;
-// 定时器 ID
+// --- 状态 ---
+const mapRef = ref(null);
+const earthquakes = ref([]);
+const platesData = ref([]); // 板块数据
+const loading = ref(true);
+const currentTime = ref(dayjs().format("YYYY-MM-DD HH:mm:ss"));
+const minMag = ref(2.5); // 默认过滤掉小地震
+const isHeatmapMode = ref(false); // GIS: 切换可视化模式
+const showPlates = ref(false); // GIS: 显示板块边界
+const mapStyle = ref("dark"); // GIS: 底图风格
+// GIS Advanced Features
+const showCluster = ref(false);
+const showBuffer = ref(false);
+const enableNearestQuery = ref(false);
+
 let timerId = null;
+let clockId = null;
 
-// 后端 API 基地址
-const BACKEND_BASE_URL = "http://127.0.0.1:5000";
+// --- 计算属性 ---
+const filteredQuakes = computed(() => {
+  return earthquakes.value
+    .filter((q) => q.magnitude >= minMag.value)
+    .sort((a, b) => new Date(b.time) - new Date(a.time));
+});
 
-// 按震级返回颜色
-function getColorByMagnitude(mag) {
-  if (mag < 2.5) return "#2ecc71"; // 绿
-  if (mag < 4.0) return "#f1c40f"; // 黄
-  if (mag < 5.5) return "#e67e22"; // 橙
-  return "#e74c3c";               // 红
+// --- 逻辑 ---
+async function loadPlatesData() {
+  try {
+    const res = await axios.get("/plates.json");
+    platesData.value = res.data;
+  } catch (error) {
+    console.error("Failed to load plates data:", error);
+  }
 }
 
-// 加载世界地图 GeoJSON 并注册到 ECharts
-async function loadWorldMap() {
-  const res = await axios.get("/world.json"); // 从 public 目录取
-  echarts.registerMap("world", res.data);
-}
-
-// 从后端获取地震数据
 async function fetchEarthquakes() {
-  const res = await axios.get(`${BACKEND_BASE_URL}/earthquakes`);
-  return res.data;
+  try {
+    const res = await axios.get("/earthquakes");
+    earthquakes.value = res.data;
+    loading.value = false;
+  } catch (error) {
+    console.error("Failed to fetch earthquakes:", error);
+    loading.value = false;
+  }
 }
 
-// 根据数据渲染 / 更新图表
-async function renderChart() {
-  const quakes = await fetchEarthquakes();
-
-  // 转成 ECharts scatter 需要的数据格式
-  const data = quakes.map((q) => ({
-    name: q.region,
-    value: [q.longitude, q.latitude, q.magnitude], // [lon, lat, mag]
-    magnitude: q.magnitude,
-    region: q.region,
-    time: q.time,
-  }));
-
-  const option = {
-    backgroundColor: "#ffffff",
-    tooltip: {
-      trigger: "item",
-      formatter: (params) => {
-        const d = params.data;
-        return `
-          <div>
-            <strong>Magnitude:</strong> ${d.magnitude.toFixed(1)}<br/>
-            <strong>Region:</strong> ${d.region}<br/>
-            <strong>Time:</strong> ${d.time}
-          </div>
-        `;
-      },
-    },
-    geo: {
-      map: "world",
-      roam: true, // 允许缩放和平移
-      itemStyle: {
-        areaColor: "#f2f2f2",
-        borderColor: "#999",
-      },
-      emphasis: {
-        itemStyle: {
-          areaColor: "#e0e0e0",
-        },
-      },
-    },
-    series: [
-      {
-        name: "Earthquakes",
-        type: "scatter",
-        coordinateSystem: "geo",
-        data,
-        symbolSize: (val) => {
-          // val[2] 是 magnitude
-          return 4 * val[2]; // 放大系数可以按需调整
-        },
-        itemStyle: {
-          color: (params) => getColorByMagnitude(params.data.magnitude),
-          opacity: 0.8,
-        },
-        label: {
-          show: true,
-          formatter: (params) => params.data.magnitude.toFixed(1),
-          position: "inside",
-          color: "#000",
-          fontSize: 9,
-        },
-      },
-    ],
-  };
-
-  chartInstance.setOption(option);
+function handleQuakeSelected(quake) {
+  if (mapRef.value) {
+    mapRef.value.focusOnQuake(quake);
+  }
 }
 
-// 初始化图表：加载地图 → 创建实例 → 首次渲染 → 启动定时刷新
-async function initChart() {
-  await loadWorldMap();
+// --- 生命周期 ---
+onMounted(async () => {
+  await Promise.all([fetchEarthquakes(), loadPlatesData()]);
 
-  chartInstance = echarts.init(chartRef.value);
-
-  await renderChart(); // 先渲染一次
-
-  // 每 30 秒刷新一次数据
-  timerId = window.setInterval(() => {
-    renderChart().catch((err) => console.error(err));
+  // 定时刷新数据
+  timerId = setInterval(async () => {
+    await fetchEarthquakes();
   }, 30000);
-}
 
-// 组件挂载时初始化图表
-onMounted(() => {
-  initChart().catch((err) => console.error(err));
-  // 自适应窗口大小
-  window.addEventListener("resize", handleResize);
+  // 时钟
+  clockId = setInterval(() => {
+    currentTime.value = dayjs().format("YYYY-MM-DD HH:mm:ss");
+  }, 1000);
 });
 
-// 组件卸载时清理
 onBeforeUnmount(() => {
-  if (timerId) {
-    window.clearInterval(timerId);
-  }
-  window.removeEventListener("resize", handleResize);
-  if (chartInstance) {
-    chartInstance.dispose();
-  }
+  clearInterval(timerId);
+  clearInterval(clockId);
 });
-
-// 窗口变化时，让图表自适应大小
-function handleResize() {
-  if (chartInstance) {
-    chartInstance.resize();
-  }
-}
 </script>
 
 <style scoped>
-.app {
-  width: 100%;
+.layout-container {
   height: 100vh;
-  display: flex;
-  flex-direction: column;
+  background-color: #020b14;
 }
 
-.title {
-  text-align: center;
-  font-size: 20px;
-  margin: 8px 0;
-}
-
-.chart {
-  flex: 1;
-  /* 留一点边距 */
-  margin: 0 8px 8px 8px;
+.main-content {
+  height: calc(100vh - 60px);
+  overflow: hidden;
 }
 </style>
