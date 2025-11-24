@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """监听 EMSC 的地震 WebSocket，把数据实时写入 DuckDB。"""
 
-from __future__ import annotations
-
 import json
 import logging
 import sys
@@ -17,7 +15,6 @@ import database
 WS_URL = "wss://www.seismicportal.eu/standing_order/websocket"
 PING_INTERVAL = 15
 
-seen_unids: set[str] = set()
 logger = logging.getLogger(__name__)
 
 
@@ -31,16 +28,16 @@ def process_message(raw_message: str) -> None:
 
     event = data.get("data", {})
     props = event.get("properties", {})
-    geom = event.get("geometry", {})
+    geometry = event.get("geometry", {})
 
     event_time = props.get("time", "")
     magnitude = props.get("mag")
     region = props.get("flynn_region", "")
     unid = props.get("unid")
     depth = props.get("depth")
-
-    coords = geom.get("coordinates", [None, None])
-    longitude, latitude = coords[0], coords[1]
+    
+    coordinates = geometry.get("coordinates", [None, None])
+    longitude, latitude = coordinates[0], coordinates[1]
 
     if None in (unid, longitude, latitude, magnitude) or not event_time:
         logger.warning("Incomplete event, skipped.")
@@ -49,18 +46,13 @@ def process_message(raw_message: str) -> None:
     region = region.replace(",", " ")
 
     try:
-        dt = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
-        event_time_str = dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        event_time = datetime.fromisoformat(event_time.replace("Z", "+00:00")).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     except Exception:
-        event_time_str = event_time
-
-    if unid in seen_unids:
-        logger.debug("Duplicate event %s skipped", unid)
-        return
+        pass
 
     quake_data = {
         "unid": unid,
-        "time": event_time_str,
+        "time": event_time,
         "latitude": float(latitude),
         "longitude": float(longitude),
         "magnitude": float(magnitude),
@@ -69,7 +61,6 @@ def process_message(raw_message: str) -> None:
     }
 
     if database.insert_earthquake(quake_data):
-        seen_unids.add(unid)
         logger.info(
             "New EQ: M%.1f %s (%.4f, %.4f)",
             float(magnitude),
@@ -77,8 +68,6 @@ def process_message(raw_message: str) -> None:
             float(latitude),
             float(longitude),
         )
-    else:
-        seen_unids.add(unid)
 
 
 @gen.coroutine
@@ -105,23 +94,22 @@ def launch_client():
         yield listen(ws)
 
 
+def start_listener_loop():
+    """在当前线程启动 IOLoop 并监听 WebSocket。"""
+    loop = IOLoop.instance()
+    loop.spawn_callback(launch_client)
+    logger.info("Starting listener IOLoop...")
+    try:
+        loop.start()
+    except KeyboardInterrupt:
+        logger.info("Stopping listener loop...")
+        loop.stop()
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         stream=sys.stdout,
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-
-    database.init_db()
-    seen_unids = database.get_all_unids()
-    logger.info("Loaded %d existing events from DB.", len(seen_unids))
-
-    loop = IOLoop.instance()
-    launch_client()
-
-    try:
-        logger.info("Starting IOLoop, Ctrl+C to stop.")
-        loop.start()
-    except KeyboardInterrupt:
-        logger.info("Stopping...")
-        loop.stop()
+    start_listener_loop()

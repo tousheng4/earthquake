@@ -59,8 +59,6 @@ const enableNearestQuery = ref(false);
 let timerId = null;
 let clockId = null;
 
-const BACKEND_BASE_URL = "http://127.0.0.1:5000";
-
 // --- 计算属性 ---
 const filteredQuakes = computed(() => {
   return earthquakes.value
@@ -80,7 +78,7 @@ async function loadPlatesData() {
 
 async function fetchEarthquakes() {
   try {
-    const res = await axios.get(`${BACKEND_BASE_URL}/earthquakes`);
+    const res = await axios.get("/earthquakes");
     earthquakes.value = res.data;
     loading.value = false;
   } catch (error) {

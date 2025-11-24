@@ -9,4 +9,6 @@ dependencies = [
     "flask-cors>=6.0.1",
     "tornado>=6.5.2",
     "duckdb>=0.10.0",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
 ]
