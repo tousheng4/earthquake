@@ -3,19 +3,25 @@
 
 import json
 import logging
+import signal
 import sys
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from tornado import gen, websocket
-from tornado.ioloop import IOLoop
+from tornado.ioloop import IOLoop, PeriodicCallback
 
 import database
 
 WS_URL = "wss://www.seismicportal.eu/standing_order/websocket"
 PING_INTERVAL = 15
+RECONNECT_DELAY = 5  # 断线重连延迟（秒）
+RESTART_INTERVAL = 3600  # 定时重启间隔（秒），0 表示不重启
 
 logger = logging.getLogger(__name__)
+
+# 当前连接实例
+_current_ws: Optional[websocket.WebSocketClientConnection] = None
 
 
 def process_message(raw_message: str) -> None:
@@ -35,7 +41,7 @@ def process_message(raw_message: str) -> None:
     region = props.get("flynn_region", "")
     unid = props.get("unid")
     depth = props.get("depth")
-    
+
     coordinates = geometry.get("coordinates", [None, None])
     longitude, latitude = coordinates[0], coordinates[1]
 
@@ -73,37 +79,84 @@ def process_message(raw_message: str) -> None:
 @gen.coroutine
 def listen(ws: websocket.WebSocketClientConnection):
     """持续从 WebSocket 读取消息。"""
-    while True:
-        msg = yield ws.read_message()
-        if msg is None:
-            logger.warning("WebSocket closed by server.")
-            break
-        process_message(msg)
+    try:
+        while True:
+            msg = yield ws.read_message()
+            if msg is None:
+                logger.warning("WebSocket closed by server.")
+                break
+            process_message(msg)
+    except Exception as e:
+        logger.info("Listen loop interrupted: %s", e)
 
 
 @gen.coroutine
 def launch_client():
-    """建立 WebSocket 连接并开始监听。"""
-    try:
-        logger.info("Connecting to %s", WS_URL)
-        ws = yield websocket.websocket_connect(WS_URL, ping_interval=PING_INTERVAL)
-    except Exception:
-        logger.exception("Connection error")
-    else:
-        logger.info("Connected, start listening...")
-        yield listen(ws)
+    """建立 WebSocket 连接并开始监听，断线自动重连。"""
+    global _current_ws
+
+    while True:
+        try:
+            logger.info("Connecting to %s", WS_URL)
+            _current_ws = yield websocket.websocket_connect(
+                WS_URL, ping_interval=PING_INTERVAL
+            )
+            logger.info("Connected, start listening...")
+            yield listen(_current_ws)
+        except Exception as e:
+            # 如果是主动关闭，不再重连
+            if "closed" in str(e).lower() or not IOLoop.current().is_running():
+                logger.info("Connection closed, exiting...")
+                break
+            logger.exception("Connection error")
+        finally:
+            _current_ws = None
+
+        # 检查事件循环是否还在运行
+        if not IOLoop.current().is_running():
+            break
+            
+        logger.info("Will reconnect in %d seconds...", RECONNECT_DELAY)
+        yield gen.sleep(RECONNECT_DELAY)
+
+
+def restart_connection():
+    """主动关闭当前连接，触发重连。"""
+    global _current_ws
+    if _current_ws is not None:
+        logger.info("Scheduled restart, closing connection...")
+        _current_ws.close()
 
 
 def start_listener_loop():
-    """在当前线程启动 IOLoop 并监听 WebSocket。"""
+    """在当前线程启动 IOLoop 并监听 WebSocket（独立运行模式）。"""
     loop = IOLoop.instance()
     loop.spawn_callback(launch_client)
+
+    # 定时重启
+    if RESTART_INTERVAL > 0:
+        pc = PeriodicCallback(restart_connection, RESTART_INTERVAL * 1000)
+        pc.start()
+        logger.info("Scheduled restart every %d seconds", RESTART_INTERVAL)
+
     logger.info("Starting listener IOLoop...")
+    
+    def shutdown_handler(sig, frame):
+        global _current_ws
+        logger.info("Stopping listener loop...")
+        if _current_ws is not None:
+            _current_ws.close()
+        loop.stop()
+    
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    
     try:
         loop.start()
-    except KeyboardInterrupt:
-        logger.info("Stopping listener loop...")
-        loop.stop()
+    finally:
+        if _current_ws is not None:
+            _current_ws.close()
+        logger.info("Listener stopped")
 
 
 if __name__ == "__main__":

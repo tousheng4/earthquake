@@ -16,6 +16,7 @@ _connection_pool: "SingleConnectionPool | None" = None
 
 def load_extensions(conn: duckdb.DuckDBPyConnection, extensions: Set[str]) -> duckdb.DuckDBPyConnection:
     for ext in extensions:
+        conn.execute(f"INSTALL {ext}")
         conn.execute(f"LOAD {ext}")
     return conn
 
