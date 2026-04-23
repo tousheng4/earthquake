@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(xxd)",
+      "Bash(pdftotext \"E:/ljc/work/learning/earthquake/全球地震实时监测与可视化分析平台.pdf\" -)",
+      "Bash(pdftotext -layout \"E:/ljc/work/learning/earthquake/全球地震实时监测与可视化分析平台.pdf\" -)"
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-"""业务逻辑层：封装查询组合与 GeoJSON 构建。"""
+"""业务逻辑层：封装查询组合与结果输出。"""
 
 from typing import Dict, List, Optional
 
@@ -20,14 +20,14 @@ def events(
     max_lon: Optional[float] = None,
     max_lat: Optional[float] = None,
 ) -> Dict:
-    """根据圆或矩形条件返回 GeoJSON。"""
+    """根据圆形或矩形条件返回 GeoJSON。"""
     query = database.EarthquakeQuery().since(hours)
-    
+
     if lon is not None and lat is not None and radius_km is not None:
         query = query.within_radius(lon, lat, radius_km)
     elif None not in (min_lon, min_lat, max_lon, max_lat):
         query = query.in_bbox(min_lon, min_lat, max_lon, max_lat)
-    
+
     return query.to_geojson()
 
 
@@ -39,7 +39,6 @@ def nearby(lon: float, lat: float, radius_km: float, hours: int) -> Dict:
 def buffered(radius_km: float, hours: int) -> Dict:
     """缓冲区查询结果转为 GeoJSON。"""
     rows = database.buffered_events(radius_km=radius_km, hours=hours)
-    # buffered_events 返回带 buffer_geojson 字段的特殊格式，需要特殊处理
     features = []
     for row in rows:
         if row.get("buffer_geojson"):
@@ -70,3 +69,58 @@ def cluster_stats(cell_km: float, hours: int) -> List[Dict]:
 def timeline(start_iso: str | None, end_iso: str | None, limit: int) -> Dict:
     """时间范围结果转为 GeoJSON。"""
     return database.EarthquakeQuery().time_range(start_iso, end_iso).order_by("time ASC").limit(limit).to_geojson()
+
+
+def region_statistics(
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    lon: float | None = None,
+    lat: float | None = None,
+    radius_km: float | None = None,
+    hours: int = 48,
+) -> Dict:
+    """区域统计。"""
+    return database.region_statistics(
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        lon=lon,
+        lat=lat,
+        radius_km=radius_km,
+        hours=hours,
+    )
+
+
+def magnitude_distribution(
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    hours: int = 48,
+) -> List[Dict]:
+    """震级分布统计。"""
+    return database.magnitude_distribution(
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        hours=hours,
+    )
+
+
+def hourly_distribution(hours: int = 48) -> List[Dict]:
+    """按小时统计地震频次。"""
+    return database.hourly_distribution(hours=hours)
+
+
+def history_timeline(years: int, bucket: str = "month") -> List[Dict]:
+    """历史时间分布统计。"""
+    return database.history_timeline(years=years, bucket=bucket)
+
+
+def history_region_distribution(years: int, limit: int = 20) -> List[Dict]:
+    """历史区域分布统计。"""
+    return database.history_region_distribution(years=years, limit=limit)

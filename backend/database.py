@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import duckdb
+import config
 
-DB_PATH = Path(__file__).resolve().with_name("earthquakes.duckdb")
-DEFAULT_EXTENSIONS: Set[str] = {"spatial"}
+DB_PATH = config.DATABASE_PATH
+DEFAULT_EXTENSIONS: Set[str] = set(config.DUCKDB_EXTENSIONS)
 logger = logging.getLogger(__name__)
 _connection_pool: "SingleConnectionPool | None" = None
 
@@ -246,8 +247,21 @@ class EarthquakeQuery:
 def insert_earthquake(data: Dict[str, Any]) -> bool:
     """插入一条地震数据，如果存在则忽略。"""
     query = """
-        INSERT INTO earthquakes (unid, time, latitude, longitude, depth, magnitude, region, geom)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ST_Point(?, ?))
+        INSERT INTO earthquakes (
+            unid,
+            time,
+            latitude,
+            longitude,
+            depth,
+            magnitude,
+            region,
+            source,
+            source_event_id,
+            is_realtime,
+            ingest_time,
+            geom
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ST_Point(?, ?))
         ON CONFLICT (unid) DO NOTHING
     """
     params: Iterable[Any] = (
@@ -258,6 +272,9 @@ def insert_earthquake(data: Dict[str, Any]) -> bool:
         data.get("depth"),
         data["magnitude"],
         data["region"],
+        data.get("source", "emsc"),
+        data.get("source_event_id", data["unid"]),
+        data.get("is_realtime", True),
         data["longitude"],
         data["latitude"],
     )
@@ -307,7 +324,7 @@ def query_nearest(
     lon: float,
     lat: float,
     limit: int = 10,
-    hours: int = 24 * 30,
+    hours: int = config.DEFAULT_NEAREST_LOOKBACK_HOURS,
 ) -> List[Dict[str, Any]]:
     """最近邻查询，按距离排序返回指定数量。"""
     return EarthquakeQuery().since(hours).nearest(lon, lat, limit).execute()
@@ -387,3 +404,213 @@ def get_time_window(
     """按时间窗口获取地震（用于轨迹/时间动画）。"""
     query = EarthquakeQuery().time_range(start_iso, end_iso).order_by("time ASC").limit(limit)
     return query.execute()
+
+
+def region_statistics(
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    lon: float | None = None,
+    lat: float | None = None,
+    radius_km: float | None = None,
+    hours: int = 48,
+) -> Dict[str, Any]:
+    """区域统计：返回地震频次、平均震级、最高震级、深度统计等。"""
+    query = EarthquakeQuery().since(hours)
+
+    if lon is not None and lat is not None and radius_km is not None:
+        query = query.within_radius(lon, lat, radius_km)
+    elif None not in (min_lon, min_lat, max_lon, max_lat):
+        query = query.in_bbox(min_lon, min_lat, max_lon, max_lat)
+    else:
+        # 无空间过滤，使用全部数据
+        pass
+
+    sql = f"""
+        SELECT
+            COUNT(*) AS total_count,
+            AVG(magnitude) AS avg_magnitude,
+            MAX(magnitude) AS max_magnitude,
+            MIN(magnitude) AS min_magnitude,
+            AVG(depth) AS avg_depth,
+            MIN(depth) AS min_depth,
+            MAX(depth) AS max_depth
+        FROM earthquakes
+        WHERE time > ?
+    """
+
+    params = [_cutoff_iso(hours)]
+
+    # 添加空间过滤条件
+    if lon is not None and lat is not None and radius_km is not None:
+        radius_m = radius_km * 1000
+        sql += f"""
+            AND ST_DWithin(
+                CAST(geom AS GEOGRAPHY),
+                CAST(ST_Point(?, ?) AS GEOGRAPHY),
+                ?
+            )
+        """
+        params = [lon, lat, radius_m] + params
+    elif None not in (min_lon, min_lat, max_lon, max_lat):
+        sql += """
+            AND ST_Intersects(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326))
+        """
+        params = [min_lon, min_lat, max_lon, max_lat] + params
+
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(sql, params).fetchone()
+            if result:
+                return {
+                    "total_count": result[0] or 0,
+                    "avg_magnitude": round(result[1], 2) if result[1] else 0,
+                    "max_magnitude": result[2] or 0,
+                    "min_magnitude": result[3] or 0,
+                    "avg_depth": round(result[4], 2) if result[4] else 0,
+                    "min_depth": result[5] or 0,
+                    "max_depth": result[6] or 0,
+                }
+    except Exception:
+        logger.exception("Error executing region_statistics")
+    return {"total_count": 0, "avg_magnitude": 0, "max_magnitude": 0, "min_magnitude": 0,
+            "avg_depth": 0, "min_depth": 0, "max_depth": 0}
+
+
+def magnitude_distribution(
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    hours: int = 48,
+    bins: list[float] | None = None,
+) -> List[Dict[str, Any]]:
+    """按震级区间统计频次分布（用于柱状图）。"""
+    if bins is None:
+        bins = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]  # 默认区间
+
+    query = EarthquakeQuery().since(hours)
+
+    if None not in (min_lon, min_lat, max_lon, max_lat):
+        query = query.in_bbox(min_lon, min_lat, max_lon, max_lat)
+
+    sql_parts = [f"SELECT magnitude FROM earthquakes WHERE time > ?"]
+    params = [_cutoff_iso(hours)]
+
+    if None not in (min_lon, min_lat, max_lon, max_lat):
+        sql_parts.append("AND ST_Intersects(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326))")
+        params = [min_lon, min_lat, max_lon, max_lat] + params
+
+    sql = " AND ".join(sql_parts)
+
+    try:
+        with _connection_scope(read_only=True) as conn:
+            df = conn.execute(sql, params).df()
+            magnitudes = df["magnitude"].tolist()
+
+        # 统计各区间频次
+        result = []
+        for i in range(len(bins) - 1):
+            count = sum(1 for m in magnitudes if bins[i] <= m < bins[i + 1])
+            result.append({
+                "range": f"{bins[i]}-{bins[i+1]}",
+                "count": count,
+                "bin_start": bins[i],
+                "bin_end": bins[i + 1]
+            })
+        # 最后一个区间上限开放
+        count = sum(1 for m in magnitudes if m >= bins[-1])
+        result.append({
+            "range": f">{bins[-1]}",
+            "count": count,
+            "bin_start": bins[-1],
+            "bin_end": None
+        })
+
+        return result
+    except Exception:
+        logger.exception("Error executing magnitude_distribution")
+    return []
+
+
+def hourly_distribution(hours: int = 48) -> List[Dict[str, Any]]:
+    """按小时统计地震频次分布（用于24小时折线图）。"""
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(
+                """
+                SELECT
+                    CAST(strftime('%H', time) AS INTEGER) AS hour,
+                    COUNT(*) AS count,
+                    AVG(magnitude) AS avg_magnitude
+                FROM earthquakes
+                WHERE time > ?
+                GROUP BY hour
+                ORDER BY hour
+                """,
+                [_cutoff_iso(hours)],
+            )
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing hourly_distribution")
+    return []
+
+
+def history_timeline(
+    years: int = config.DEFAULT_HISTORY_IMPORT_YEARS,
+    bucket: str = "month",
+) -> List[Dict[str, Any]]:
+    """Aggregate historical earthquakes by month or day."""
+    bucket = bucket.lower()
+    if bucket not in {"month", "day"}:
+        bucket = "month"
+
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(
+                f"""
+                SELECT
+                    strftime(date_trunc('{bucket}', CAST(time AS TIMESTAMP)), '%Y-%m-%d') AS bucket_start,
+                    COUNT(*) AS event_count
+                FROM earthquakes
+                WHERE
+                    CAST(time AS TIMESTAMP) >= now() - (? * INTERVAL '1 year')
+                    AND is_realtime = false
+                GROUP BY 1
+                ORDER BY bucket_start ASC
+                """,
+                [years],
+            )
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing history_timeline")
+    return []
+
+
+def history_region_distribution(
+    years: int = config.DEFAULT_HISTORY_IMPORT_YEARS,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Aggregate historical earthquakes by region."""
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(
+                """
+                SELECT
+                    COALESCE(NULLIF(region, ''), 'UNKNOWN') AS region,
+                    COUNT(*) AS event_count
+                FROM earthquakes
+                WHERE
+                    CAST(time AS TIMESTAMP) >= now() - (? * INTERVAL '1 year')
+                    AND is_realtime = false
+                GROUP BY 1
+                ORDER BY event_count DESC, region ASC
+                LIMIT ?
+                """,
+                [years, limit],
+            )
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing history_region_distribution")
+    return []

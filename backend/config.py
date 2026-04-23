@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# Database
+DATABASE_PATH = Path(os.getenv("EARTHQUAKE_DB_PATH", BASE_DIR / "earthquakes.duckdb"))
+DUCKDB_EXTENSIONS = tuple(
+    ext.strip()
+    for ext in os.getenv("EARTHQUAKE_DUCKDB_EXTENSIONS", "spatial").split(",")
+    if ext.strip()
+)
+
+# Default query windows
+DEFAULT_QUERY_HOURS = int(os.getenv("EARTHQUAKE_DEFAULT_QUERY_HOURS", "48"))
+DEFAULT_NEAREST_LOOKBACK_HOURS = int(
+    os.getenv("EARTHQUAKE_DEFAULT_NEAREST_LOOKBACK_HOURS", str(24 * 30))
+)
+DEFAULT_TIMELINE_LIMIT = int(os.getenv("EARTHQUAKE_DEFAULT_TIMELINE_LIMIT", "2000"))
+
+# GIS defaults
+DEFAULT_CLUSTER_CELL_KM = float(os.getenv("EARTHQUAKE_DEFAULT_CLUSTER_CELL_KM", "50"))
+DEFAULT_BUFFER_RADIUS_KM = float(os.getenv("EARTHQUAKE_DEFAULT_BUFFER_RADIUS_KM", "200"))
+
+# Planning placeholders for upcoming MVP steps
+DEFAULT_HISTORY_IMPORT_YEARS = int(os.getenv("EARTHQUAKE_DEFAULT_HISTORY_IMPORT_YEARS", "3"))
+DEFAULT_HISTORY_IMPORT_SOURCE_PATH = Path(
+    os.getenv("EARTHQUAKE_DEFAULT_HISTORY_IMPORT_SOURCE_PATH", BASE_DIR / "earthquakes.csv")
+)
+DEFAULT_HISTORY_IMPORT_SOURCE_NAME = os.getenv(
+    "EARTHQUAKE_DEFAULT_HISTORY_IMPORT_SOURCE_NAME", "history_csv"
+)
+DEFAULT_HISTORY_IMPORT_BATCH_SIZE = int(
+    os.getenv("EARTHQUAKE_DEFAULT_HISTORY_IMPORT_BATCH_SIZE", "500")
+)
+
+# Risk scoring placeholders for future analytics work
+RISK_WEIGHT_MAGNITUDE = float(os.getenv("EARTHQUAKE_RISK_WEIGHT_MAGNITUDE", "0.4"))
+RISK_WEIGHT_DEPTH = float(os.getenv("EARTHQUAKE_RISK_WEIGHT_DEPTH", "0.2"))
+RISK_WEIGHT_ACTIVITY = float(os.getenv("EARTHQUAKE_RISK_WEIGHT_ACTIVITY", "0.2"))
+RISK_WEIGHT_ANOMALY = float(os.getenv("EARTHQUAKE_RISK_WEIGHT_ANOMALY", "0.2"))

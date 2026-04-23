@@ -25,3 +25,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Documents
+*.ppt
+*.pdf
+ppt.md
+require.md

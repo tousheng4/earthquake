@@ -5,9 +5,10 @@ import logging
 from pathlib import Path
 
 import duckdb
+import config
 
-DB_PATH = Path(__file__).resolve().with_name("earthquakes.duckdb")
-EXTENSIONS = ["spatial"]
+DB_PATH = config.DATABASE_PATH
+EXTENSIONS = list(config.DUCKDB_EXTENSIONS)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,9 +43,18 @@ def create_tables(conn: duckdb.DuckDBPyConnection, schema: str = "") -> None:
             magnitude DOUBLE NOT NULL,
             region VARCHAR,
             geom GEOMETRY,
+            source VARCHAR DEFAULT 'emsc',
+            source_event_id VARCHAR,
+            is_realtime BOOLEAN DEFAULT true,
+            ingest_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'emsc'")
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS source_event_id VARCHAR")
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS is_realtime BOOLEAN DEFAULT true")
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS ingest_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     
     # 创建索引
     conn.execute(f"""

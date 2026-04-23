@@ -1,12 +1,11 @@
 """Simple script to pre-create the DuckDB database schema."""
 
-from pathlib import Path
-
 import duckdb
+import config
 
 
-DB_PATH = Path(__file__).resolve().with_name("earthquakes.duckdb")
-REQUIRED_EXTENSIONS = ("spatial", "geo")
+DB_PATH = config.DATABASE_PATH
+REQUIRED_EXTENSIONS = tuple(dict.fromkeys((*config.DUCKDB_EXTENSIONS, "geo")))
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS earthquakes (
     unid VARCHAR PRIMARY KEY,
@@ -17,9 +16,20 @@ CREATE TABLE IF NOT EXISTS earthquakes (
     magnitude DOUBLE,
     region VARCHAR,
     geom GEOMETRY,
+    source VARCHAR DEFAULT 'emsc',
+    source_event_id VARCHAR,
+    is_realtime BOOLEAN DEFAULT true,
+    ingest_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
+
+SCHEMA_MIGRATIONS = (
+    "ALTER TABLE earthquakes ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'emsc'",
+    "ALTER TABLE earthquakes ADD COLUMN IF NOT EXISTS source_event_id VARCHAR",
+    "ALTER TABLE earthquakes ADD COLUMN IF NOT EXISTS is_realtime BOOLEAN DEFAULT true",
+    "ALTER TABLE earthquakes ADD COLUMN IF NOT EXISTS ingest_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+)
 
 
 def init_db() -> None:
@@ -30,6 +40,8 @@ def init_db() -> None:
             conn.execute(f"INSTALL {ext}")
             conn.execute(f"LOAD {ext}")
         conn.execute(SCHEMA_SQL)
+        for sql in SCHEMA_MIGRATIONS:
+            conn.execute(sql)
         print(f"[OK] Database ready at {DB_PATH}")
     finally:
         conn.close()
