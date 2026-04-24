@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Optional
 
+import config
 import database
 
 
@@ -124,3 +125,58 @@ def history_timeline(years: int, bucket: str = "month") -> List[Dict]:
 def history_region_distribution(years: int, limit: int = 20) -> List[Dict]:
     """历史区域分布统计。"""
     return database.history_region_distribution(years=years, limit=limit)
+
+
+def risk_ranking(
+    hours: int = config.DEFAULT_FEATURE_RECENT_WINDOW_HOURS,
+    limit: int = config.DEFAULT_RISK_QUERY_LIMIT,
+    min_risk_level: str = "low",
+) -> List[Dict]:
+    """高风险事件排行。"""
+    return database.risk_ranking(hours=hours, limit=limit, min_risk_level=min_risk_level)
+
+
+def risk_event_detail(event_unid: str) -> Dict | None:
+    """单事件风险评估详情。"""
+    row = database.risk_event_detail(event_unid)
+    if row is None:
+        return None
+
+    return {
+        "event": {
+            "event_unid": row.get("event_unid"),
+            "event_time": row.get("event_time"),
+            "region": row.get("region"),
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "depth": row.get("depth"),
+            "magnitude": row.get("magnitude"),
+            "source": row.get("source"),
+            "source_event_id": row.get("source_event_id"),
+            "is_realtime": row.get("is_realtime"),
+            "ingest_time": row.get("ingest_time"),
+        },
+        "feature_summary": {
+            "recent_window_hours": row.get("recent_window_hours"),
+            "recent_region_event_count": row.get("recent_region_event_count"),
+            "recent_region_avg_magnitude": row.get("recent_region_avg_magnitude"),
+            "historical_baseline_years": row.get("historical_baseline_years"),
+            "historical_region_event_count": row.get("historical_region_event_count"),
+            "historical_avg_daily_count": row.get("historical_avg_daily_count"),
+            "historical_daily_count_stddev": row.get("historical_daily_count_stddev"),
+            "anomaly_score": row.get("anomaly_score"),
+            "feature_version": row.get("feature_version"),
+            "refreshed_at": row.get("refreshed_at"),
+        },
+        "risk": {
+            "risk_score": row.get("risk_score"),
+            "risk_level": row.get("risk_level"),
+            "magnitude_component": row.get("magnitude_component"),
+            "depth_component": row.get("depth_component"),
+            "activity_component": row.get("activity_component"),
+            "anomaly_component": row.get("anomaly_component"),
+            "explanation": row.get("explanation"),
+            "score_version": row.get("score_version"),
+            "scored_at": row.get("scored_at"),
+        },
+    }

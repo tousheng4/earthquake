@@ -162,6 +162,23 @@ def stats_history_region_distribution():
     return jsonify(rows)
 
 
+@app.route("/risk/ranking")
+def risk_ranking():
+    hours = request.args.get("hours", default=config.DEFAULT_FEATURE_RECENT_WINDOW_HOURS, type=int)
+    limit = request.args.get("limit", default=config.DEFAULT_RISK_QUERY_LIMIT, type=int)
+    min_risk_level = request.args.get("min_risk_level", default="low", type=str)
+    rows = service.risk_ranking(hours=hours, limit=limit, min_risk_level=min_risk_level)
+    return jsonify(rows)
+
+
+@app.route("/risk/events/<event_unid>")
+def risk_event_detail_api(event_unid: str):
+    detail = service.risk_event_detail(event_unid)
+    if detail is None:
+        return jsonify({"error": "event not found"}), 404
+    return jsonify(detail)
+
+
 @app.route("/earthquakes/timeline")
 def earthquakes_timeline():
     start_time = request.args.get("start")

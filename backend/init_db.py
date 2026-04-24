@@ -32,6 +32,8 @@ def create_tables(conn: duckdb.DuckDBPyConnection, schema: str = "") -> None:
     logger.info("创建表结构...")
     
     table_name = f"{schema}.earthquakes" if schema else "earthquakes"
+    feature_table_name = f"{schema}.earthquake_features" if schema else "earthquake_features"
+    risk_table_name = f"{schema}.earthquake_risk_scores" if schema else "earthquake_risk_scores"
     
     conn.execute(f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
@@ -65,6 +67,63 @@ def create_tables(conn: duckdb.DuckDBPyConnection, schema: str = "") -> None:
     conn.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_earthquakes_magnitude 
         ON {table_name}(magnitude DESC)
+    """)
+
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {feature_table_name} (
+            event_unid VARCHAR PRIMARY KEY,
+            event_time TIMESTAMP NOT NULL,
+            region VARCHAR,
+            magnitude DOUBLE,
+            depth DOUBLE,
+            recent_window_hours INTEGER NOT NULL,
+            recent_region_event_count INTEGER,
+            recent_region_avg_magnitude DOUBLE,
+            historical_baseline_years INTEGER NOT NULL,
+            historical_region_event_count INTEGER,
+            historical_avg_daily_count DOUBLE,
+            historical_daily_count_stddev DOUBLE,
+            anomaly_score DOUBLE,
+            feature_version VARCHAR DEFAULT 'v1',
+            refreshed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_earthquake_features_event_time
+        ON {feature_table_name}(event_time DESC)
+    """)
+
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_earthquake_features_region
+        ON {feature_table_name}(region)
+    """)
+
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {risk_table_name} (
+            event_unid VARCHAR PRIMARY KEY,
+            event_time TIMESTAMP NOT NULL,
+            region VARCHAR,
+            risk_score DOUBLE,
+            risk_level VARCHAR,
+            magnitude_component DOUBLE,
+            depth_component DOUBLE,
+            activity_component DOUBLE,
+            anomaly_component DOUBLE,
+            explanation TEXT,
+            score_version VARCHAR DEFAULT 'v1',
+            scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_earthquake_risk_scores_score
+        ON {risk_table_name}(risk_score DESC)
+    """)
+
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_earthquake_risk_scores_event_time
+        ON {risk_table_name}(event_time DESC)
     """)
     
     logger.info("✓ 表结构已创建")

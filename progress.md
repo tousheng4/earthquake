@@ -246,3 +246,243 @@
 ### 给后续开发者的提示
 - 下一步应严格进入特征构建，不要在这一轮继续扩展更多历史统计维度。
 - 前端接入历史图表时，优先直接消费这两个接口返回的列表结果，不要先做过度封装。
+
+## 第六步完成记录：建立事件特征缓存层
+
+### 本步目标
+- 为后续风险评分准备第一版结构化特征存储。
+- 先建立事件特征缓存表和最小读写入口，不提前把风险接口和前端展示混进来。
+
+### 本步修改的文件
+- `backend/config.py`
+- `backend/init_db.py`
+- `backend/manage.py`
+- `backend/database.py`
+- `architecture.md`
+- `progress.md`
+
+### 本步新增或变更的能力
+- 在 `backend/config.py` 中新增特征构建相关配置：
+  - `DEFAULT_FEATURE_RECENT_WINDOW_HOURS`
+  - `DEFAULT_FEATURE_BASELINE_YEARS`
+  - `DEFAULT_FEATURE_BATCH_LIMIT`
+  - `FEATURE_SCHEMA_VERSION`
+- 在数据库中新增 `earthquake_features` 表，用于缓存事件级特征：
+  - 事件基础字段：`event_unid`、`event_time`、`region`、`magnitude`、`depth`
+  - 当前窗口特征：`recent_window_hours`、`recent_region_event_count`、`recent_region_avg_magnitude`
+  - 历史基线特征：`historical_baseline_years`、`historical_region_event_count`
+  - 历史统计特征：`historical_avg_daily_count`、`historical_daily_count_stddev`
+  - 异常特征：`anomaly_score`
+  - 缓存元数据：`feature_version`、`refreshed_at`
+- 在 `backend/database.py` 中新增最小特征访问层：
+  - `list_feature_candidates`
+  - `upsert_earthquake_features`
+  - `get_event_feature`
+  - `list_event_features`
+- 初始化脚本和管理脚本现在都能直接创建特征缓存表与索引。
+
+### 本步自验证
+- 执行 `uv run python -m py_compile config.py init_db.py manage.py database.py`
+  - 结果：语法检查通过。
+- 使用单进程临时数据库执行建表与特征写读校验
+  - 结果：`earthquake_features` 表可以成功创建。
+  - 结果：写入两条样例特征后，`upsert_earthquake_features` 返回 `2`。
+  - 结果：`list_event_features(limit=5)` 返回 2 条记录。
+  - 结果：`get_event_feature('feature_test_event_1')` 可正确读回区域 `WESTERN TURKEY`。
+
+### 本步结论
+- 第六步的目标已经落到可验证代码结构。
+- 当前系统已经具备承接“事件特征结果”的最小缓存层，但还没有进入批量特征刷新任务和风险评分阶段。
+
+### 给后续开发者的提示
+- 下一步应严格进入“实现特征构建任务”，将具体计算逻辑放入分析模块，把任务文件作为调度入口。
+- 风险评分应继续复用本步已经固定下来的特征字段口径，避免在后续步骤中重新发明一套命名。
+
+## 第七步完成记录：实现特征构建任务
+
+### 本步目标
+- 为近期重点事件补充可重复执行的特征刷新流程。
+- 将复杂特征计算放进分析模块，任务脚本只负责调度和输出统计结果。
+
+### 本步修改的文件
+- `backend/analysis/__init__.py`
+- `backend/analysis/feature_builder.py`
+- `backend/jobs/refresh_features.py`
+- `architecture.md`
+- `progress.md`
+
+### 本步新增或变更的能力
+- 新增分析模块 `backend/analysis/feature_builder.py`
+  - 支持基于事件时间和区域计算第一版特征行
+  - 当前窗口特征包括：
+    - `recent_region_event_count`
+    - `recent_region_avg_magnitude`
+  - 历史基线特征包括：
+    - `historical_region_event_count`
+    - `historical_avg_daily_count`
+    - `historical_daily_count_stddev`
+  - 支持生成 `anomaly_score`
+- 新增任务脚本 `backend/jobs/refresh_features.py`
+  - 支持通过 `--hours` 指定刷新时间窗口
+  - 支持通过 `--limit` 控制单次处理事件数
+  - 支持通过 `--baseline-years` 指定历史基线范围
+  - 输出候选数、处理数、写入数、失败数和耗时
+- 特征刷新流程现在可以复用第六步建立的 `earthquake_features` 缓存表，重复执行时走 upsert 而不是重复插入。
+
+### 本步自验证
+- 执行 `uv run python -m py_compile analysis\\__init__.py analysis\\feature_builder.py jobs\\refresh_features.py database.py config.py init_db.py manage.py`
+  - 结果：语法检查通过。
+- 使用临时数据库执行初始化、历史导入和两次特征刷新
+  - 结果：首轮 `candidate_rows=13`、`processed_rows=13`、`written_rows=13`、`failed_rows=0`
+  - 结果：第二轮对相同窗口重复刷新后，仍为 `candidate_rows=13`、`processed_rows=13`、`written_rows=13`、`failed_rows=0`
+  - 结果：`list_event_features(limit=20)` 可查到 13 条特征记录
+- 抽查三个不同区域的样例特征
+  - 结果：`PHILIPPINE ISLANDS REGION`、`FIJI REGION`、`BABUYAN ISL REGION  PHILIPPINES` 的 `recent_region_avg_magnitude` 分别为 `4.1`、`4.5`、`4.4`，说明特征值不是统一默认值
+
+### 本步结论
+- 第七步已经达到可验收状态。
+- 当前系统已经具备面向近期事件的批量特征构建能力，并且刷新流程可重复执行。
+- 当前仍未进入风险评分、风险接口和前端风险面板阶段。
+
+### 给后续开发者的提示
+- 下一步应严格进入“第一版规则型风险评分”，优先复用当前特征缓存表，不要重新临时拼装特征。
+- 风险评分解释文本应以当前特征字段为基础组织，保持后续接口、报告和前端口径一致。
+
+## 第八步完成记录：实现第一版规则型风险评分
+
+### 本步目标
+- 基于已构建的事件特征，生成第一版可解释的规则型风险评分。
+- 输出综合分数、风险等级和自然语言解释，并让权重配置真正参与评分。
+
+### 本步修改的文件
+- `backend/config.py`
+- `backend/init_db.py`
+- `backend/manage.py`
+- `backend/database.py`
+- `backend/analysis/risk_scorer.py`
+- `backend/jobs/score_risk.py`
+- `architecture.md`
+- `progress.md`
+
+### 本步新增或变更的能力
+- 在 `backend/config.py` 中补充风险评分配置：
+  - `RISK_LEVEL_HIGH_THRESHOLD`
+  - `RISK_LEVEL_MEDIUM_THRESHOLD`
+  - `RISK_SCHEMA_VERSION`
+- 在数据库中新增 `earthquake_risk_scores` 缓存表，用于保存事件评分结果：
+  - `risk_score`
+  - `risk_level`
+  - `magnitude_component`
+  - `depth_component`
+  - `activity_component`
+  - `anomaly_component`
+  - `explanation`
+  - `score_version`
+  - `scored_at`
+- 在 `backend/database.py` 中新增风险评分缓存读写入口：
+  - `upsert_risk_scores`
+  - `get_risk_score`
+  - `list_risk_scores`
+- 新增评分模块 `backend/analysis/risk_scorer.py`
+  - 基于震级、深度、近期活跃度、异常程度四部分做规则加权
+  - 生成 `low` / `medium` / `high` 风险等级
+  - 生成可直接用于答辩或报告的自然语言解释
+- 新增任务脚本 `backend/jobs/score_risk.py`
+  - 支持按批次对已缓存的事件特征执行评分
+  - 输出候选数、处理数、写入数、失败数和耗时
+
+### 本步自验证
+- 执行 `uv run python -m py_compile analysis\\__init__.py analysis\\feature_builder.py analysis\\risk_scorer.py jobs\\refresh_features.py jobs\\score_risk.py database.py config.py init_db.py manage.py`
+  - 结果：语法检查通过。
+- 使用临时数据库执行初始化、历史导入、特征刷新和风险评分
+  - 结果：`import_inserted_rows=13`
+  - 结果：`feature_written_rows=13`
+  - 结果：评分任务 `candidate_rows=13`、`processed_rows=13`、`written_rows=13`、`failed_rows=0`
+  - 结果：`list_risk_scores(limit=5)` 可返回评分结果，样例最高分为 `44.5`，等级为 `medium`，且解释文本非空
+- 使用人工构造的高风险/低风险样例比较评分
+  - 结果：高风险样例得分 `85.2`、等级 `high`
+  - 结果：低风险样例得分 `24.5`、等级 `low`
+  - 结果：高风险样例得分显著高于低风险样例
+- 验证权重配置生效
+  - 结果：同一测试事件在默认权重下得分为 `61.3333`
+  - 结果：将震级权重上调后得分变为 `68.1667`
+  - 结果：说明评分结果会随配置变化而合理变化
+
+### 本步结论
+- 第八步已经达到可验收状态。
+- 当前系统已经具备稳定、可解释、可调参的第一版风险评分能力。
+- 当前仍未进入风险查询接口和前端风险面板阶段。
+
+### 给后续开发者的提示
+- 下一步应严格进入“新增风险查询接口”，优先直接复用 `earthquake_risk_scores` 和 `earthquake_features` 两层缓存结果。
+- 风险接口中的详情返回应尽量保留本步生成的评分解释原文，避免前后端出现两套解释口径。
+
+## 第九步完成记录：新增风险查询接口
+
+### 本步目标
+- 将已有风险评分结果稳定暴露为后端查询接口。
+- 提供高风险事件排行和单事件评估详情两个入口，并保证空数据和不存在事件时返回结构稳定。
+
+### 本步修改的文件
+- `backend/config.py`
+- `backend/database.py`
+- `backend/service.py`
+- `backend/api.py`
+- `architecture.md`
+- `progress.md`
+
+### 本步新增或变更的能力
+- 在 `backend/config.py` 中新增：
+  - `DEFAULT_RISK_QUERY_LIMIT`
+- 在 `backend/database.py` 中新增：
+  - `risk_ranking`
+  - `risk_event_detail`
+- 在 `backend/service.py` 中新增：
+  - `risk_ranking`
+  - `risk_event_detail`
+- 在 `backend/api.py` 中新增接口：
+  - `/risk/ranking`
+  - `/risk/events/<event_unid>`
+
+### 新接口说明
+- `/risk/ranking`
+  - 作用：返回按风险分数排序的事件列表
+  - 主要参数：
+    - `hours`
+    - `limit`
+    - `min_risk_level=low|medium|high`
+- `/risk/events/<event_unid>`
+  - 作用：返回指定事件的基础信息、特征摘要和风险评分详情
+  - 主要返回块：
+    - `event`
+    - `feature_summary`
+    - `risk`
+
+### 本步自验证
+- 执行 `uv run python -m py_compile api.py service.py database.py config.py init_db.py manage.py analysis\\risk_scorer.py jobs\\score_risk.py`
+  - 结果：语法检查通过。
+- 使用临时数据库执行初始化、历史导入、特征刷新、风险评分后，使用 Flask 测试客户端请求新接口
+  - `/risk/ranking?hours=30000&limit=5&min_risk_level=low`
+    - 结果：返回 `200`
+    - 结果：返回 5 条记录，且记录中包含风险分量、事件时间、事件标识等字段
+  - `/risk/events/<event_unid>`
+    - 结果：返回 `200`
+    - 结果：返回结构同时包含 `event`、`feature_summary`、`risk`
+  - `/risk/events/not_found_event`
+    - 结果：返回 `404`
+    - 结果：返回体为 `{"error": "event not found"}`
+  - `/risk/ranking?hours=30000&limit=5&min_risk_level=high`
+    - 结果：返回 `200`
+    - 结果：返回体结构稳定，为列表类型
+- 使用空临时数据库直接请求 `/risk/ranking?hours=48&limit=5&min_risk_level=high`
+  - 结果：返回 `200`
+  - 结果：返回空列表 `[]`
+
+### 本步结论
+- 第九步已经达到可验收状态。
+- 当前系统已经具备供前端和报告模块消费的最小风险查询接口。
+- 当前仍未进入前端风险面板阶段。
+
+### 给后续开发者的提示
+- 下一步应严格进入“前端新增最小风险面板”，优先直接消费本步接口，不要先做过度封装。
+- 前端详情展示应直接复用 `risk.explanation` 和 `feature_summary`，保持前后端字段口径一致。

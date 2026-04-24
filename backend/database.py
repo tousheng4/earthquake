@@ -614,3 +614,397 @@ def history_region_distribution(
     except Exception:
         logger.exception("Error executing history_region_distribution")
     return []
+
+
+FEATURE_UPSERT_SQL = """
+    INSERT INTO earthquake_features (
+        event_unid,
+        event_time,
+        region,
+        magnitude,
+        depth,
+        recent_window_hours,
+        recent_region_event_count,
+        recent_region_avg_magnitude,
+        historical_baseline_years,
+        historical_region_event_count,
+        historical_avg_daily_count,
+        historical_daily_count_stddev,
+        anomaly_score,
+        feature_version,
+        refreshed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (event_unid) DO UPDATE SET
+        event_time = EXCLUDED.event_time,
+        region = EXCLUDED.region,
+        magnitude = EXCLUDED.magnitude,
+        depth = EXCLUDED.depth,
+        recent_window_hours = EXCLUDED.recent_window_hours,
+        recent_region_event_count = EXCLUDED.recent_region_event_count,
+        recent_region_avg_magnitude = EXCLUDED.recent_region_avg_magnitude,
+        historical_baseline_years = EXCLUDED.historical_baseline_years,
+        historical_region_event_count = EXCLUDED.historical_region_event_count,
+        historical_avg_daily_count = EXCLUDED.historical_avg_daily_count,
+        historical_daily_count_stddev = EXCLUDED.historical_daily_count_stddev,
+        anomaly_score = EXCLUDED.anomaly_score,
+        feature_version = EXCLUDED.feature_version,
+        refreshed_at = EXCLUDED.refreshed_at
+"""
+
+
+def list_feature_candidates(
+    hours: int = config.DEFAULT_FEATURE_RECENT_WINDOW_HOURS,
+    limit: int = config.DEFAULT_FEATURE_BATCH_LIMIT,
+) -> List[Dict[str, Any]]:
+    """列出后续特征刷新优先处理的近期事件。"""
+    query = """
+        SELECT
+            unid,
+            CAST(time AS TIMESTAMP) AS time,
+            latitude,
+            longitude,
+            depth,
+            magnitude,
+            COALESCE(NULLIF(region, ''), 'UNKNOWN') AS region,
+            source,
+            source_event_id,
+            is_realtime
+        FROM earthquakes
+        WHERE CAST(time AS TIMESTAMP) >= now() - (? * INTERVAL '1 hour')
+        ORDER BY CAST(time AS TIMESTAMP) DESC
+        LIMIT ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(query, [hours, limit])
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing list_feature_candidates")
+    return []
+
+
+def upsert_earthquake_features(rows: List[Dict[str, Any]]) -> int:
+    """批量写入或更新事件特征缓存。"""
+    if not rows:
+        return 0
+
+    inserted = 0
+    try:
+        with _connection_scope(read_only=False) as conn:
+            for row in rows:
+                conn.execute(
+                    FEATURE_UPSERT_SQL,
+                    [
+                        row["event_unid"],
+                        row["event_time"],
+                        row.get("region"),
+                        row.get("magnitude"),
+                        row.get("depth"),
+                        row["recent_window_hours"],
+                        row.get("recent_region_event_count"),
+                        row.get("recent_region_avg_magnitude"),
+                        row["historical_baseline_years"],
+                        row.get("historical_region_event_count"),
+                        row.get("historical_avg_daily_count"),
+                        row.get("historical_daily_count_stddev"),
+                        row.get("anomaly_score"),
+                        row.get("feature_version", config.FEATURE_SCHEMA_VERSION),
+                        row.get("refreshed_at", datetime.now(timezone.utc)),
+                    ],
+                )
+                inserted += 1
+        return inserted
+    except Exception:
+        logger.exception("Error executing upsert_earthquake_features")
+    return 0
+
+
+def get_event_feature(event_unid: str) -> Optional[Dict[str, Any]]:
+    """读取单个事件的特征缓存。"""
+    query = """
+        SELECT
+            event_unid,
+            event_time,
+            region,
+            magnitude,
+            depth,
+            recent_window_hours,
+            recent_region_event_count,
+            recent_region_avg_magnitude,
+            historical_baseline_years,
+            historical_region_event_count,
+            historical_avg_daily_count,
+            historical_daily_count_stddev,
+            anomaly_score,
+            feature_version,
+            refreshed_at
+        FROM earthquake_features
+        WHERE event_unid = ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            row = conn.execute(query, [event_unid]).fetchdf()
+            if row.empty:
+                return None
+            return row.to_dict(orient="records")[0]
+    except Exception:
+        logger.exception("Error executing get_event_feature")
+    return None
+
+
+def list_event_features(limit: int = 20) -> List[Dict[str, Any]]:
+    """列出最近刷新的一批事件特征。"""
+    query = """
+        SELECT
+            event_unid,
+            event_time,
+            region,
+            magnitude,
+            depth,
+            recent_window_hours,
+            recent_region_event_count,
+            recent_region_avg_magnitude,
+            historical_baseline_years,
+            historical_region_event_count,
+            historical_avg_daily_count,
+            historical_daily_count_stddev,
+            anomaly_score,
+            feature_version,
+            refreshed_at
+        FROM earthquake_features
+        ORDER BY refreshed_at DESC, event_time DESC
+        LIMIT ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(query, [limit])
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing list_event_features")
+    return []
+
+
+RISK_SCORE_UPSERT_SQL = """
+    INSERT INTO earthquake_risk_scores (
+        event_unid,
+        event_time,
+        region,
+        risk_score,
+        risk_level,
+        magnitude_component,
+        depth_component,
+        activity_component,
+        anomaly_component,
+        explanation,
+        score_version,
+        scored_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (event_unid) DO UPDATE SET
+        event_time = EXCLUDED.event_time,
+        region = EXCLUDED.region,
+        risk_score = EXCLUDED.risk_score,
+        risk_level = EXCLUDED.risk_level,
+        magnitude_component = EXCLUDED.magnitude_component,
+        depth_component = EXCLUDED.depth_component,
+        activity_component = EXCLUDED.activity_component,
+        anomaly_component = EXCLUDED.anomaly_component,
+        explanation = EXCLUDED.explanation,
+        score_version = EXCLUDED.score_version,
+        scored_at = EXCLUDED.scored_at
+"""
+
+
+def upsert_risk_scores(rows: List[Dict[str, Any]]) -> int:
+    """批量写入或更新事件风险评分结果。"""
+    if not rows:
+        return 0
+
+    inserted = 0
+    try:
+        with _connection_scope(read_only=False) as conn:
+            for row in rows:
+                conn.execute(
+                    RISK_SCORE_UPSERT_SQL,
+                    [
+                        row["event_unid"],
+                        row["event_time"],
+                        row.get("region"),
+                        row.get("risk_score"),
+                        row.get("risk_level"),
+                        row.get("magnitude_component"),
+                        row.get("depth_component"),
+                        row.get("activity_component"),
+                        row.get("anomaly_component"),
+                        row.get("explanation"),
+                        row.get("score_version", config.RISK_SCHEMA_VERSION),
+                        row.get("scored_at", datetime.now(timezone.utc)),
+                    ],
+                )
+                inserted += 1
+        return inserted
+    except Exception:
+        logger.exception("Error executing upsert_risk_scores")
+    return 0
+
+
+def get_risk_score(event_unid: str) -> Optional[Dict[str, Any]]:
+    """读取单个事件的风险评分结果。"""
+    query = """
+        SELECT
+            event_unid,
+            event_time,
+            region,
+            risk_score,
+            risk_level,
+            magnitude_component,
+            depth_component,
+            activity_component,
+            anomaly_component,
+            explanation,
+            score_version,
+            scored_at
+        FROM earthquake_risk_scores
+        WHERE event_unid = ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            row = conn.execute(query, [event_unid]).fetchdf()
+            if row.empty:
+                return None
+            return row.to_dict(orient="records")[0]
+    except Exception:
+        logger.exception("Error executing get_risk_score")
+    return None
+
+
+def list_risk_scores(limit: int = 20) -> List[Dict[str, Any]]:
+    """列出最近一批高风险优先排序的评分结果。"""
+    query = """
+        SELECT
+            event_unid,
+            event_time,
+            region,
+            risk_score,
+            risk_level,
+            magnitude_component,
+            depth_component,
+            activity_component,
+            anomaly_component,
+            explanation,
+            score_version,
+            scored_at
+        FROM earthquake_risk_scores
+        ORDER BY risk_score DESC, event_time DESC
+        LIMIT ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(query, [limit])
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing list_risk_scores")
+    return []
+
+
+def risk_ranking(
+    hours: int = config.DEFAULT_FEATURE_RECENT_WINDOW_HOURS,
+    limit: int = config.DEFAULT_RISK_QUERY_LIMIT,
+    min_risk_level: str = "low",
+) -> List[Dict[str, Any]]:
+    """查询按风险排序的事件列表。"""
+    level_rank_map = {"low": 1, "medium": 2, "high": 3}
+    normalized_level = str(min_risk_level or "low").lower()
+    minimum_rank = level_rank_map.get(normalized_level, 1)
+
+    query = """
+        SELECT
+            r.event_unid,
+            r.event_time,
+            r.region,
+            e.latitude,
+            e.longitude,
+            e.depth,
+            e.magnitude,
+            e.source,
+            e.source_event_id,
+            e.is_realtime,
+            r.risk_score,
+            r.risk_level,
+            r.magnitude_component,
+            r.depth_component,
+            r.activity_component,
+            r.anomaly_component,
+            r.explanation,
+            r.score_version,
+            r.scored_at
+        FROM earthquake_risk_scores r
+        JOIN earthquakes e ON e.unid = r.event_unid
+        WHERE
+            CAST(r.event_time AS TIMESTAMP) >= now() - (? * INTERVAL '1 hour')
+            AND CASE r.risk_level
+                WHEN 'high' THEN 3
+                WHEN 'medium' THEN 2
+                ELSE 1
+            END >= ?
+        ORDER BY r.risk_score DESC, CAST(r.event_time AS TIMESTAMP) DESC
+        LIMIT ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(query, [hours, minimum_rank, limit])
+            return result.df().to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing risk_ranking")
+    return []
+
+
+def risk_event_detail(event_unid: str) -> Optional[Dict[str, Any]]:
+    """查询单个事件的基础信息、特征和风险评分详情。"""
+    query = """
+        SELECT
+            e.unid AS event_unid,
+            CAST(e.time AS TIMESTAMP) AS event_time,
+            COALESCE(NULLIF(e.region, ''), 'UNKNOWN') AS region,
+            e.latitude,
+            e.longitude,
+            e.depth,
+            e.magnitude,
+            e.source,
+            e.source_event_id,
+            e.is_realtime,
+            e.ingest_time,
+            f.recent_window_hours,
+            f.recent_region_event_count,
+            f.recent_region_avg_magnitude,
+            f.historical_baseline_years,
+            f.historical_region_event_count,
+            f.historical_avg_daily_count,
+            f.historical_daily_count_stddev,
+            f.anomaly_score,
+            f.feature_version,
+            f.refreshed_at,
+            r.risk_score,
+            r.risk_level,
+            r.magnitude_component,
+            r.depth_component,
+            r.activity_component,
+            r.anomaly_component,
+            r.explanation,
+            r.score_version,
+            r.scored_at
+        FROM earthquakes e
+        LEFT JOIN earthquake_features f ON f.event_unid = e.unid
+        LEFT JOIN earthquake_risk_scores r ON r.event_unid = e.unid
+        WHERE e.unid = ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            row = conn.execute(query, [event_unid]).fetchdf()
+            if row.empty:
+                return None
+            return row.to_dict(orient="records")[0]
+    except Exception:
+        logger.exception("Error executing risk_event_detail")
+    return None
