@@ -59,6 +59,8 @@ earthquake/
         formatters.js             前端格式化工具，处理时间、颜色、经纬度等展示格式
       components/
         EarthquakeMap.vue         地图核心组件，负责地震点和 GIS 图层交互
+        RiskPanel.vue             风险排行面板组件，负责展示高风险事件列表和单事件评估详情
         Sidebar.vue               侧边栏组件，负责统计卡片、筛选项和地震列表展示
+                                 现已集成最小风险面板
         TopHeader.vue             顶部控制栏组件
 ```

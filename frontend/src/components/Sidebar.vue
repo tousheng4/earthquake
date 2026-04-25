@@ -70,6 +70,8 @@
         </div>
       </el-card>
 
+      <RiskPanel />
+
       <!-- 列表 -->
       <div class="list-container">
         <div class="list-header">Recent Earthquakes</div>
@@ -99,6 +101,7 @@
 <script setup>
 import { computed } from 'vue';
 import { getColorByMagnitude, formatTime } from '../utils/formatters';
+import RiskPanel from './RiskPanel.vue';
 
 const props = defineProps({
   filteredQuakes: {
@@ -129,14 +132,17 @@ const maxMagnitude = computed(() => {
   border-right: 1px solid #1f2d3d;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .sidebar-content {
   padding: 15px;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.sidebar-content > * + * {
+  margin-top: 15px;
 }
 
 .stats-row {
@@ -205,7 +211,7 @@ const maxMagnitude = computed(() => {
 }
 
 .list-container {
-  flex: 1;
+  height: 420px;
   background-color: #162438;
   border: 1px solid #2c3e50;
   border-radius: 4px;
