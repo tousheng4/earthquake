@@ -584,3 +584,53 @@
 ### 给后续开发者的提示
 - 下一步如果继续按 MVP 主线推进，可以进入前端历史基础图表补齐。
 - 如果转入答辩准备阶段，应优先整理固定演示脚本、测试数据和截图，而不是继续扩张功能范围。
+
+## 附加升级记录：历史数据源切换到官方 USGS
+
+### 本次目标
+- 将历史数据导入从仓库内置样例 CSV 升级为优先使用官方 USGS 接口。
+- 保留本地 CSV 作为离线兜底，避免网络不可用时完全失去导入能力。
+
+### 本次修改的文件
+- `backend/config.py`
+- `backend/jobs/import_history.py`
+- `architecture.md`
+- `运行说明.md`
+- `progress.md`
+
+### 本次新增或变更的能力
+- 在 `backend/config.py` 中新增 USGS 相关配置：
+  - `DEFAULT_HISTORY_IMPORT_SOURCE_TYPE`
+  - `USGS_EVENT_QUERY_URL`
+  - `USGS_DEFAULT_MIN_MAGNITUDE`
+  - `USGS_DEFAULT_CHUNK_DAYS`
+  - `USGS_DEFAULT_REQUEST_TIMEOUT`
+  - `USGS_DEFAULT_MAX_RETRIES`
+- `backend/jobs/import_history.py` 现在支持两种导入模式：
+  - `--source-type usgs`
+  - `--source-type csv`
+- USGS 模式会调用官方 FDSN Event Query 接口并解析 GeoJSON 结果
+- CSV 模式保留原有字段映射、去重和入库逻辑
+- 导入脚本新增参数：
+  - `--usgs-min-magnitude`
+  - `--usgs-chunk-days`
+  - `--request-timeout`
+  - `--max-retries`
+
+### 本次自验证
+- 执行 `uv run python -m py_compile config.py jobs\\import_history.py`
+  - 结果：语法检查通过。
+- 使用临时数据库执行 CSV 兜底导入
+  - 结果：`inserted_rows=13`
+  - 结果：现有 CSV 导入链路仍然正常
+- 对官方 USGS 源做了真实联网验证尝试
+  - 结果：当前环境访问 USGS 时出现 TLS 握手中断
+  - 结果：因此本轮无法在该环境中完成成功抓取样例，但脚本逻辑、参数结构和兜底链路已完成
+
+### 本次结论
+- 历史导入脚本已经升级为“USGS 优先、CSV 保底”的结构。
+- 在网络环境正常的机器上，应优先使用官方 USGS 接口作为真实历史数据来源。
+
+### 给后续开发者的提示
+- 如果运行环境访问 USGS 仍出现 TLS 或代理问题，优先检查系统网络、证书链和公司代理，而不是回退导入逻辑。
+- 若后续需要稳定大批量导入，可继续在 USGS 模式上补充分段时间窗口控制和更细粒度的失败重试记录。

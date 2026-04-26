@@ -38,7 +38,7 @@ earthquake/
                                  现已负责风险排行与风险详情结构整理
     uv.lock                       uv 依赖锁文件
     jobs/
-      import_history.py           历史数据导入脚本，用于从本地 CSV 导入历史地震数据并去重入库
+      import_history.py           历史数据导入脚本，优先支持从官方 USGS 接口导入历史地震数据，并保留本地 CSV 兜底
       migrate_event_schema.py     事件表结构迁移脚本，用于补齐统一事件层字段并回填旧数据
       refresh_features.py         特征刷新任务脚本，用于按时间窗口批量构建并写入事件特征
       score_risk.py               风险评分任务脚本，用于批量生成事件风险评分结果
