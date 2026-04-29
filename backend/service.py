@@ -37,9 +37,9 @@ def nearby(lon: float, lat: float, radius_km: float, hours: int) -> Dict:
     return database.EarthquakeQuery().since(hours).within_radius(lon, lat, radius_km).to_geojson()
 
 
-def buffered(radius_km: float, hours: int) -> Dict:
+def buffered(radius_km: float, hours: int, event_unid: str | None = None) -> Dict:
     """缓冲区查询结果转为 GeoJSON。"""
-    rows = database.buffered_events(radius_km=radius_km, hours=hours)
+    rows = database.buffered_events(radius_km=radius_km, hours=hours, event_unid=event_unid)
     features = []
     for row in rows:
         if row.get("buffer_geojson"):

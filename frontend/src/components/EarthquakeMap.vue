@@ -16,6 +16,31 @@
       <span>Loading Data...</span>
     </div>
 
+    <div class="nearest-result" v-if="nearestResult">
+      <div class="nearest-label">Nearest Epicenter</div>
+      <div class="nearest-region">{{ nearestResult.region || "UNKNOWN" }}</div>
+      <div class="nearest-distance">{{ nearestResult.distanceKm }} km away</div>
+    </div>
+
+    <div class="selected-quake-card" v-if="selectedQuake">
+      <div class="selected-label">Selected Earthquake</div>
+      <div class="selected-region">{{ selectedQuake.region || "UNKNOWN" }}</div>
+      <div class="selected-grid">
+        <div>
+          <span>Magnitude</span>
+          <strong>M {{ formatMagnitude(selectedQuake.magnitude) }}</strong>
+        </div>
+        <div>
+          <span>Depth</span>
+          <strong>{{ formatDepth(selectedQuake.depth) }}</strong>
+        </div>
+        <div class="selected-time">
+          <span>Time</span>
+          <strong>{{ formatSelectedTime(selectedQuake.time) }}</strong>
+        </div>
+      </div>
+    </div>
+
     <!-- 时间轴控件 -->
     <div class="time-slider-container" v-if="earthquakes.length > 0">
       <div class="control-row">
@@ -80,6 +105,9 @@ let chartInstance = null;
 const bufferData = ref(null); // GeoJSON for buffer
 const clusterData = ref([]); // Data for cluster view
 const nearestLine = ref(null); // Line to nearest quake
+const nearestResult = ref(null);
+const nearestPoints = ref([]);
+const selectedQuake = ref(null);
 
 // --- Playback State ---
 const isPlaying = ref(false);
@@ -166,6 +194,31 @@ function stopPlayback() {
 
 function formatTooltip(val) {
   return dayjs(val).format("YYYY-MM-DD HH:mm");
+}
+
+function formatMagnitude(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(1) : "--";
+}
+
+function formatDepth(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(1)} km` : "--";
+}
+
+function formatSelectedTime(value) {
+  return value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "--";
+}
+
+function geometryToRings(geometry) {
+  if (!geometry) return [];
+  if (geometry.type === "Polygon") {
+    return geometry.coordinates || [];
+  }
+  if (geometry.type === "MultiPolygon") {
+    return (geometry.coordinates || []).flat();
+  }
+  return [];
 }
 
 // --- ECharts 逻辑 ---
@@ -324,27 +377,36 @@ function getChartOption(data) {
   }
 
   // 2. 缓冲区图层 (GIS)
-  if (props.showBuffer && bufferData.value) {
-    // ECharts GeoJSON support via map registration or custom series is tricky for dynamic shapes.
-    // Simplified approach: Use 'lines' to draw the buffer boundary if it's a polygon, 
-    // or register a temporary map. Here we register a temp map for the buffer.
-    echarts.registerMap('buffer_layer', bufferData.value);
+  if (props.showBuffer && bufferData.value?.features?.length) {
     baseOption.series.push({
-      type: 'map',
-      map: 'buffer_layer',
-      geoIndex: 0, // Share the same geo coordinate system
-      itemStyle: {
-        areaColor: 'rgba(255, 0, 0, 0.1)',
-        borderColor: '#ff0000',
-        borderWidth: 1,
-        borderType: 'dashed'
+      type: "custom",
+      name: "Earthquake Buffers",
+      coordinateSystem: "geo",
+      data: bufferData.value.features,
+      renderItem: (params, api) => {
+        const feature = bufferData.value.features[params.dataIndex];
+        const rings = geometryToRings(feature?.geometry);
+        if (!rings.length) return null;
+
+        return {
+          type: "group",
+          children: rings.map((ring) => ({
+            type: "polygon",
+            shape: {
+              points: ring.map((coord) => api.coord(coord))
+            },
+            style: {
+              fill: "rgba(255, 64, 64, 0.12)",
+              stroke: "#ff4040",
+              lineWidth: 1,
+              lineDash: [6, 4]
+            },
+            silent: true
+          }))
+        };
       },
-      emphasis: {
-        label: { show: false },
-        itemStyle: { areaColor: 'rgba(255, 0, 0, 0.2)' }
-      },
-      zlevel: 1.5,
-      silent: true // Do not trigger events
+      zlevel: 2,
+      silent: true
     });
   }
 
@@ -368,6 +430,28 @@ function getChartOption(data) {
         symbolSize: 3
       },
       zlevel: 3
+    });
+
+    baseOption.series.push({
+      type: "scatter",
+      name: "Nearest Query Points",
+      coordinateSystem: "geo",
+      data: nearestPoints.value,
+      symbolSize: (value, params) => params.data.role === "clicked" ? 13 : 16,
+      itemStyle: {
+        color: (params) => params.data.role === "clicked" ? "#ffffff" : "#1ecf77",
+        borderColor: "#0d1b2a",
+        borderWidth: 2
+      },
+      label: {
+        show: true,
+        formatter: (params) => params.data.role === "clicked" ? "Clicked" : "Nearest",
+        position: "right",
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 700
+      },
+      zlevel: 4
     });
   }
 
@@ -399,7 +483,8 @@ function getChartOption(data) {
       label: {
         show: true,
         formatter: '{@[2]}',
-        fontSize: 10,
+        fontSize: 16,
+        fontWeight: 700,
         color: '#fff'
       },
       zlevel: 1
@@ -454,16 +539,13 @@ function getChartOption(data) {
 // --- GIS Actions ---
 async function fetchBuffer(quake) {
   if (!props.showBuffer) return;
+  if (!quake?.unid) return;
   try {
-    // Request 200km buffer for example
-    const res = await axios.get(`/earthquakes/buffer?radius_km=200&hours=48`);
-    // Filter for the specific quake if needed, or just show all buffers. 
-    // The API returns buffers for ALL quakes in window. 
-    // Let's optimize: The user probably wants the buffer for the SELECTED quake.
-    // But the current API returns a collection. 
-    // Let's assume we want to visualize the buffer for the *focused* quake.
-    // Since the API calculates buffers for *filtered* events, we might get many.
-    // For this demo, let's just use the result directly.
+    bufferData.value = null;
+    updateChart();
+    const res = await axios.get(
+      `/earthquakes/buffer?radius_km=200&hours=48&unid=${encodeURIComponent(quake.unid)}`,
+    );
     bufferData.value = res.data;
     updateChart();
   } catch (e) {
@@ -493,13 +575,29 @@ async function handleMapClick(params) {
     const [lon, lat] = params.coord || chartInstance.convertFromPixel('geo', [params.event.offsetX, params.event.offsetY]);
     
     try {
-      const res = await axios.get(`/earthquakes/nearest?lon=${lon}&lat=${lat}&limit=1`);
+      const res = await axios.get(`/earthquakes/nearest?lon=${lon}&lat=${lat}&limit=1&hours=48`);
       if (res.data && res.data.length > 0) {
         const nearest = res.data[0];
         // Draw line
         nearestLine.value = {
           coords: [[lon, lat], [nearest.longitude, nearest.latitude]],
           distance: nearest.distance_m
+        };
+        nearestPoints.value = [
+          {
+            name: "Clicked Location",
+            role: "clicked",
+            value: [lon, lat]
+          },
+          {
+            name: nearest.region || "Nearest Epicenter",
+            role: "nearest",
+            value: [nearest.longitude, nearest.latitude]
+          }
+        ];
+        nearestResult.value = {
+          region: nearest.region,
+          distanceKm: (Number(nearest.distance_m || 0) / 1000).toFixed(1)
         };
         updateChart();
       }
@@ -509,46 +607,59 @@ async function handleMapClick(params) {
   } else {
     // Clear line if clicking elsewhere
     nearestLine.value = null;
+    nearestResult.value = null;
+    nearestPoints.value = [];
     updateChart();
   }
 }
 
 // --- Lifecycle ---
-function updateChart() {
+function updateChart({ preserveView = true } = {}) {
   if (!chartInstance) return;
+  const currentOption = chartInstance.getOption();
+  const currentGeo = currentOption?.geo?.[0];
   chartInstance.clear();
   // Use displayedQuakes instead of props.earthquakes
   // If showing cluster, we don't use displayedQuakes for the main series
   const dataToUse = props.showCluster ? [] : displayedQuakes.value;
   const option = getChartOption(dataToUse);
+  if (preserveView && currentGeo && option.geo) {
+    option.geo.center = currentGeo.center;
+    option.geo.zoom = currentGeo.zoom;
+  }
   chartInstance.setOption(option);
 }
 
 function focusOnQuake(quake) {
   if (!chartInstance) return;
+  selectedQuake.value = quake;
   
-  // GIS: Fetch buffer if enabled
-  if (props.showBuffer) {
-      // Ideally we'd fetch buffer just for this quake. 
-      // Current API fetches all. Let's stick to that for now or improve API later.
-      fetchBuffer(quake);
-  }
-
   // Ensure the quake is visible in the current time window
   if (new Date(quake.time).getTime() > sliderValue.value) {
       sliderValue.value = new Date(quake.time).getTime();
   }
 
-  chartInstance.dispatchAction({
-    type: "showTip",
-    seriesIndex: 0,
-    dataIndex: displayedQuakes.value.indexOf(quake) // Find index in filtered list
+  requestAnimationFrame(() => {
+    const option = chartInstance.getOption();
+    option.geo[0].center = [quake.longitude, quake.latitude];
+    option.geo[0].zoom = 5; // 放大
+    chartInstance.setOption(option);
   });
 
-  const option = chartInstance.getOption();
-  option.geo[0].center = [quake.longitude, quake.latitude];
-  option.geo[0].zoom = 5; // 放大
-  chartInstance.setOption(option);
+  if (props.showBuffer) {
+      fetchBuffer(quake);
+  }
+
+  requestAnimationFrame(() => {
+    const dataIndex = displayedQuakes.value.findIndex((item) => item.unid === quake.unid);
+    if (dataIndex >= 0) {
+      chartInstance.dispatchAction({
+        type: "showTip",
+        seriesIndex: 0,
+        dataIndex
+      });
+    }
+  });
 }
 
 defineExpose({ focusOnQuake });
@@ -579,6 +690,17 @@ onBeforeUnmount(() => {
 });
 
 watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.mapStyle, props.showBuffer, props.showCluster, props.enableNearestQuery], () => {
+  if (!props.enableNearestQuery) {
+      nearestLine.value = null;
+      nearestResult.value = null;
+      nearestPoints.value = [];
+  }
+  if (props.showBuffer && selectedQuake.value && !bufferData.value) {
+      fetchBuffer(selectedQuake.value);
+  }
+  if (!props.showBuffer) {
+      bufferData.value = null;
+  }
   if (props.showCluster) {
       fetchCluster();
   } else {
@@ -658,6 +780,102 @@ watch(() => [props.earthquakes, props.isHeatmapMode, props.showPlates, props.map
   color: #409eff;
   gap: 10px;
   z-index: 100;
+}
+
+.nearest-result {
+  position: absolute;
+  top: 86px;
+  left: 24px;
+  z-index: 20;
+  max-width: 280px;
+  padding: 14px 16px;
+  border: 1px solid #1ecf77;
+  border-radius: 8px;
+  background-color: rgba(13, 27, 42, 0.92);
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(6px);
+}
+
+.nearest-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #1ecf77;
+}
+
+.nearest-region {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.nearest-distance {
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 800;
+  color: #a7f3c4;
+}
+
+.selected-quake-card {
+  position: absolute;
+  top: 86px;
+  right: 24px;
+  z-index: 20;
+  width: 320px;
+  padding: 14px 16px;
+  border: 1px solid #409eff;
+  border-radius: 8px;
+  background-color: rgba(13, 27, 42, 0.94);
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(6px);
+}
+
+.selected-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #8ec5ff;
+}
+
+.selected-region {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.selected-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.selected-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.selected-grid span {
+  font-size: 11px;
+  color: #8aa0b8;
+  text-transform: uppercase;
+}
+
+.selected-grid strong {
+  font-size: 14px;
+  color: #fff;
+}
+
+.selected-grid .selected-time {
+  grid-column: 1 / -1;
 }
 
 .time-slider-container {

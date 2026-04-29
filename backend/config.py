@@ -55,6 +55,16 @@ USGS_DEFAULT_REQUEST_TIMEOUT = int(
 USGS_DEFAULT_MAX_RETRIES = int(
     os.getenv("EARTHQUAKE_USGS_DEFAULT_MAX_RETRIES", "3")
 )
+EMSC_EVENT_QUERY_URL = os.getenv(
+    "EARTHQUAKE_EMSC_EVENT_QUERY_URL",
+    "https://www.seismicportal.eu/fdsnws/event/1/query",
+)
+EMSC_RECENT_IMPORT_HOURS = int(
+    os.getenv("EARTHQUAKE_EMSC_RECENT_IMPORT_HOURS", "48")
+)
+EMSC_RECENT_IMPORT_LIMIT = int(
+    os.getenv("EARTHQUAKE_EMSC_RECENT_IMPORT_LIMIT", "20000")
+)
 
 # Feature engineering defaults
 DEFAULT_FEATURE_RECENT_WINDOW_HOURS = int(

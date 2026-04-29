@@ -56,9 +56,10 @@ def earthquakes_near():
 def earthquakes_buffer():
     radius_km = request.args.get("radius_km", type=float)
     hours = request.args.get("hours", default=config.DEFAULT_QUERY_HOURS, type=int)
+    event_unid = request.args.get("unid", type=str)
     if radius_km is None:
         return jsonify({"error": "radius_km is required"}), 400
-    geojson = service.buffered(radius_km=radius_km, hours=hours)
+    geojson = service.buffered(radius_km=radius_km, hours=hours, event_unid=event_unid)
     return jsonify(geojson)
 
 

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -145,7 +146,7 @@ class EarthquakeQuery:
     def nearest(self, lon: float, lat: float, limit: int = 10) -> "EarthquakeQuery":
         """最近邻查询。"""
         self._select_fields = "*, ST_Distance_Sphere(geom, ST_Point(?, ?)) AS distance_m"
-        self._params = [lon, lat] + self._params
+        self._params = [lat, lon] + self._params
         self._order_by = "distance_m ASC"
         self._limit = limit
         self._require_geom = True
@@ -327,33 +328,100 @@ def query_nearest(
     hours: int = config.DEFAULT_NEAREST_LOOKBACK_HOURS,
 ) -> List[Dict[str, Any]]:
     """最近邻查询，按距离排序返回指定数量。"""
-    return EarthquakeQuery().since(hours).nearest(lon, lat, limit).execute()
+    query = """
+        SELECT
+            *,
+            6371000 * 2 * ASIN(
+                SQRT(
+                    POWER(SIN(RADIANS(latitude - ?) / 2), 2)
+                    + COS(RADIANS(?))
+                    * COS(RADIANS(latitude))
+                    * POWER(SIN(RADIANS(longitude - ?) / 2), 2)
+                )
+            ) AS distance_m
+        FROM earthquakes
+        WHERE time > ? AND latitude IS NOT NULL AND longitude IS NOT NULL
+        ORDER BY distance_m ASC
+        LIMIT ?
+    """
+    try:
+        with _connection_scope(read_only=True) as conn:
+            result = conn.execute(query, [lat, lat, lon, _cutoff_iso(hours), limit])
+            df = result.df()
+            if "geom" in df.columns:
+                df = df.drop(columns=["geom"])
+            return df.to_dict(orient="records")
+    except Exception:
+        logger.exception("Error executing query_nearest")
+        return []
 
 
-def buffered_events(radius_km: float, hours: int = 48) -> List[Dict[str, Any]]:
+def buffered_events(
+    radius_km: float,
+    hours: int = 48,
+    event_unid: str | None = None,
+) -> List[Dict[str, Any]]:
     """返回按时间筛选后的地震，并给出缓冲区几何的 GeoJSON。"""
-    radius_m = radius_km * 1000
+    where_clauses = ["time > ?", "latitude IS NOT NULL", "longitude IS NOT NULL"]
+    params: List[Any] = [_cutoff_iso(hours)]
+    if event_unid:
+        where_clauses.append("unid = ?")
+        params.append(event_unid)
+
     try:
         with _connection_scope(read_only=True) as conn:
             result = conn.execute(
-                """
+                f"""
                 SELECT
-                    unid, time, latitude, longitude, depth, magnitude, region,
-                    ST_AsGeoJSON(
-                        ST_Buffer(
-                            CAST(geom AS GEOGRAPHY),
-                            ?
-                        )::GEOMETRY
-                    ) AS buffer_geojson
+                    unid, time, latitude, longitude, depth, magnitude, region
                 FROM earthquakes
-                WHERE time > ? AND geom IS NOT NULL
+                WHERE {" AND ".join(where_clauses)}
                 """,
-                [radius_m, _cutoff_iso(hours)],
+                params,
             )
-            return result.df().to_dict(orient="records")
+            rows = result.df().to_dict(orient="records")
+            for row in rows:
+                row["buffer_geojson"] = json.dumps(
+                    _circle_polygon_geojson(
+                        lon=float(row["longitude"]),
+                        lat=float(row["latitude"]),
+                        radius_km=radius_km,
+                    )
+                )
+            return rows
     except Exception:
         logger.exception("Error executing buffered_events query")
         return []
+
+
+def _circle_polygon_geojson(
+    lon: float,
+    lat: float,
+    radius_km: float,
+    segments: int = 72,
+) -> Dict[str, Any]:
+    """Build an approximate geodesic circle polygon around a lon/lat point."""
+    earth_radius_km = 6371.0
+    angular_distance = radius_km / earth_radius_km
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    ring: List[List[float]] = []
+
+    for index in range(segments + 1):
+        bearing = math.radians((360.0 * index) / segments)
+        lat2 = math.asin(
+            math.sin(lat1) * math.cos(angular_distance)
+            + math.cos(lat1) * math.sin(angular_distance) * math.cos(bearing)
+        )
+        lon2 = lon1 + math.atan2(
+            math.sin(bearing) * math.sin(angular_distance) * math.cos(lat1),
+            math.cos(angular_distance) - math.sin(lat1) * math.sin(lat2),
+        )
+        point_lon = ((math.degrees(lon2) + 540.0) % 360.0) - 180.0
+        point_lat = math.degrees(lat2)
+        ring.append([round(point_lon, 6), round(point_lat, 6)])
+
+    return {"type": "Polygon", "coordinates": [ring]}
 
 
 def cluster_grid(cell_km: float = 50, hours: int = 48) -> List[Dict[str, Any]]:
